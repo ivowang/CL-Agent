@@ -1,0 +1,103 @@
+# Continual Learning Configuration for RAGEN (Baseline/Naive Method)
+# This config enables sequential training on multiple environments using the same LoRA module.
+#
+# Checkpoint structure:
+#   checkpoints/baseline/{timestamp}/global_step_{N}/
+#
+# Usage:
+#   python train_continual.py --config-name continual_learning
+#   or
+#   bash run_continual.sh
+#
+# Resume from checkpoint:
+#   python train_continual.py --config-name continual_learning \
+#       continual_learning.resume_checkpoint=/path/to/checkpoint
+
+defaults:
+  - base
+
+# Override base settings for continual learning
+trainer:
+  project_name: ragen_continual_learning
+  experiment_name: cl_baseline
+  total_training_steps: 200  # Will be overridden per task
+  test_freq: 10  # Validate every 10 steps on all seen tasks
+  save_freq: 200  # Save checkpoint at end of each task
+  val_before_train: True
+  generations_to_log_to_wandb:
+    val: 20
+  logger: ['console', 'wandb']
+  max_actor_ckpt_to_keep: 5
+  max_critic_ckpt_to_keep: 5
+  resume_mode: disable  # Will be set dynamically
+
+# Continual Learning specific settings
+continual_learning:
+  # Base experiment name
+  experiment_name: cl_baseline
+  
+  # Base directory for checkpoints
+  # Actual path: {checkpoint_base_dir}/{method_name}/{timestamp}/
+  checkpoint_base_dir: checkpoints
+  
+  # Number of training steps per task
+  steps_per_task: 100
+  
+  # Resume from checkpoint (optional)
+  # If not set, training starts from scratch
+  # If set, training resumes from the checkpoint and continues to the next task
+  # The task is determined by: global_step // steps_per_task
+  resume_checkpoint: null
+  
+  # CL Method configuration (baseline = naive shared LoRA)
+  method:
+    name: baseline  # or 'naive' (same thing)
+  
+  # List of tasks to train on sequentially
+  # Order: Bandit -> Sokoban -> Frozen Lake
+  tasks:
+    - name: bandit
+      train_tags: ["Bandit"]
+      train_n_groups: [8]
+      val_tags: ["Bandit"]
+      val_n_groups: [32]
+    
+    - name: sokoban
+      train_tags: ["CoordSokoban"]
+      train_n_groups: [8]
+      val_tags: ["CoordSokoban"]
+      val_n_groups: [32]
+    
+    - name: frozen_lake
+      train_tags: ["CoordFrozenLake"]
+      train_n_groups: [8]
+      val_tags: ["CoordFrozenLake"]
+      val_n_groups: [32]
+
+# Agent proxy settings
+agent_proxy:
+  max_turn: 5
+  max_actions_per_turn: 2
+
+# ES Manager settings (will be overridden per task dynamically)
+es_manager:
+  train:
+    env_groups: 8
+    group_size: 16
+    env_configs:
+      tags: ["Bandit"]  # Placeholder, will be overridden
+      n_groups: [8]
+  val:
+    env_groups: 32
+    group_size: 16
+    env_configs:
+      tags: ["Bandit"]  # Placeholder, will be overridden
+      n_groups: [32]
+
+# Rollout settings
+actor_rollout_ref:
+  rollout:
+    response_length: 500
+    val_kwargs:
+      do_sample: True
+      temperature: 0.5

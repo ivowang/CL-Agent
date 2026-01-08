@@ -1,0 +1,107 @@
+# O-LoRA Continual Learning Configuration for RAGEN
+# 
+# This config enables sequential training using O-LoRA (Orthogonal Low-Rank Adaptation)
+# which learns each task in an orthogonal subspace to minimize catastrophic forgetting.
+#
+# Checkpoint structure:
+#   checkpoints/olora/{timestamp}/global_step_{N}/
+#
+# Usage:
+#   python train_continual.py --config-name continual_learning_olora
+#   or
+#   bash run_continual_olora.sh
+#
+# Resume from checkpoint:
+#   python train_continual.py --config-name continual_learning_olora \
+#       continual_learning.resume_checkpoint=/path/to/checkpoint
+
+defaults:
+  - base
+  - _self_
+
+# Override base settings for O-LoRA continual learning
+trainer:
+  project_name: ragen_continual_learning
+  experiment_name: cl_olora
+  total_training_steps: 200  # Will be overridden per task
+  test_freq: 10  # Validate every 10 steps on all seen tasks
+  save_freq: 200  # Save checkpoint at end of each task
+  val_before_train: True
+  generations_to_log_to_wandb:
+    val: 20
+  logger: ['console', 'wandb']
+  max_actor_ckpt_to_keep: 5
+  max_critic_ckpt_to_keep: 5
+  resume_mode: disable
+
+# Continual Learning specific settings
+continual_learning:
+  experiment_name: cl_olora
+  
+  # Base directory for checkpoints
+  # Actual path: {checkpoint_base_dir}/olora/{timestamp}/
+  checkpoint_base_dir: checkpoints
+  
+  steps_per_task: 100
+  
+  # Resume from checkpoint (optional)
+  # If not set, training starts from scratch
+  # If set, training resumes from the checkpoint and continues to the next task
+  # The task is determined by: global_step // steps_per_task
+  resume_checkpoint: null
+  
+  # CL Method configuration
+  method:
+    name: olora
+    # O-LoRA specific parameters
+    lambda_ortho: 0.5  # Weight for orthogonal loss
+    lambda_l2: 0.0     # Weight for L2 regularization
+    lora_rank: 64      # LoRA rank per task
+  
+  # Tasks to train sequentially
+  tasks:
+    - name: bandit
+      train_tags: ["Bandit"]
+      train_n_groups: [8]
+      val_tags: ["Bandit"]
+      val_n_groups: [32]
+    
+    - name: sokoban
+      train_tags: ["CoordSokoban"]
+      train_n_groups: [8]
+      val_tags: ["CoordSokoban"]
+      val_n_groups: [32]
+    
+    - name: frozen_lake
+      train_tags: ["CoordFrozenLake"]
+      train_n_groups: [8]
+      val_tags: ["CoordFrozenLake"]
+      val_n_groups: [32]
+
+# Agent proxy settings
+agent_proxy:
+  max_turn: 5
+  max_actions_per_turn: 2
+
+# ES Manager settings (will be overridden per task dynamically)
+es_manager:
+  train:
+    env_groups: 8
+    group_size: 16
+    env_configs:
+      tags: ["Bandit"]
+      n_groups: [8]
+  val:
+    env_groups: 32
+    group_size: 16
+    env_configs:
+      tags: ["Bandit"]
+      n_groups: [32]
+
+# Rollout settings
+actor_rollout_ref:
+  rollout:
+    response_length: 500
+    val_kwargs:
+      do_sample: True
+      temperature: 0.5
