@@ -177,8 +177,9 @@ class ContinualLearningAgentTrainer(RayAgentTrainer):
         
         # Also update the ctx_manager's env_nums to match the new ES manager
         # This is crucial for correct metric normalization in _compute_metrics
+        # Note: es_manager.config is already the es_manager.val sub-config (set in EnvStateManager.__init__)
         new_env_nums = {}
-        es_cfg = es_manager.config.es_manager.val
+        es_cfg = es_manager.config
         for n_group, env_tag in zip(es_cfg.env_configs.n_groups, es_cfg.env_configs.tags):
             new_env_nums[env_tag] = n_group * es_cfg.group_size
         self.agent_proxy.val_ctx_manager.env_nums = new_env_nums

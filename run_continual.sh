@@ -21,8 +21,8 @@
 set -e
 
 # Initialize micromamba
-eval "$(micromamba shell hook --shell bash)"
-micromamba activate ragen
+# eval "$(micromamba shell hook --shell bash)"
+# micromamba activate ragen
 
 # Configuration
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
