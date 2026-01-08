@@ -168,11 +168,20 @@ class ContinualLearningAgentTrainer(RayAgentTrainer):
         sample_scores = []
         env_metric_dict = {}
         
-        # Store original ES managers
+        # Store original ES managers and ctx_manager env_nums
         original_val_es = self.agent_proxy.val_es_manager
+        original_env_nums = self.agent_proxy.val_ctx_manager.env_nums.copy()
         
         # Temporarily replace with task-specific ES manager
         self.agent_proxy.val_es_manager = es_manager
+        
+        # Also update the ctx_manager's env_nums to match the new ES manager
+        # This is crucial for correct metric normalization in _compute_metrics
+        new_env_nums = {}
+        es_cfg = es_manager.config.es_manager.val
+        for n_group, env_tag in zip(es_cfg.env_configs.n_groups, es_cfg.env_configs.tags):
+            new_env_nums[env_tag] = n_group * es_cfg.group_size
+        self.agent_proxy.val_ctx_manager.env_nums = new_env_nums
         
         try:
             for step in range(self.config.trainer.validation_steps):
@@ -213,8 +222,9 @@ class ContinualLearningAgentTrainer(RayAgentTrainer):
                 data_source_lst.append(data_sources_batch)
                 
         finally:
-            # Restore original ES manager
+            # Restore original ES manager and env_nums
             self.agent_proxy.val_es_manager = original_val_es
+            self.agent_proxy.val_ctx_manager.env_nums = original_env_nums
         
         # Process metrics
         data_sources = np.concatenate(data_source_lst, axis=0)
