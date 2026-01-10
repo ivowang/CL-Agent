@@ -27,28 +27,6 @@ CL-Agent enables researchers to investigate how LLM-based agents can learn seque
 - **Multiple continual learning paradigms**: sequential, interleaved, and in-context learning
 - **Distributed training** via Ray and FSDP for scalability
 
-### Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        CL-Agent Framework                          │
-├─────────────────────────────────────────────────────────────────┤
-│  Continual Learning Methods                                      │
-│  ├── Baseline (Naive Sequential)                                 │
-│  ├── O-LoRA (Orthogonal Low-Rank Adaptation)                    │
-│  ├── Experience Replay (In-Context Learning)                    │
-│  └── Mix (Interleaved Multi-Task)                               │
-├─────────────────────────────────────────────────────────────────┤
-│  Agent Trainer (Ray-based Distributed Training)                 │
-│  └── PPO with LoRA fine-tuning                                  │
-├─────────────────────────────────────────────────────────────────┤
-│  Interactive Environments                                        │
-│  ├── Bandit         │  Sokoban        │  Frozen Lake            │
-│  ├── Countdown      │  WebShop        │  Lean (Theorem Proving) │
-│  └── MetaMathQA     │  Sudoku         │  ...                    │
-└─────────────────────────────────────────────────────────────────┘
-```
-
 ---
 
 ## Quick Start
