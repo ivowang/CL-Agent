@@ -161,6 +161,8 @@ class ContinualLearningAgentTrainer(RayAgentTrainer):
     
     def _validate_single_task(self, es_manager, task_name):
         """Validate on a single task using the given ES manager."""
+        from ragen.llm_agent.ctx_manager import ContextManager
+        
         data_source_lst = []
         reward_extra_infos_dict = defaultdict(list)
         sample_inputs = []
@@ -168,21 +170,22 @@ class ContinualLearningAgentTrainer(RayAgentTrainer):
         sample_scores = []
         env_metric_dict = {}
         
-        # Store original ES managers and ctx_manager env_nums
+        # Store original ES manager and ctx_manager
         original_val_es = self.agent_proxy.val_es_manager
-        original_env_nums = self.agent_proxy.val_ctx_manager.env_nums.copy()
+        original_val_ctx = self.agent_proxy.val_ctx_manager
         
         # Temporarily replace with task-specific ES manager
         self.agent_proxy.val_es_manager = es_manager
         
-        # Also update the ctx_manager's env_nums to match the new ES manager
-        # This is crucial for correct metric normalization in _compute_metrics
-        # Note: es_manager.config is already the es_manager.val sub-config (set in EnvStateManager.__init__)
-        new_env_nums = {}
-        es_cfg = es_manager.config
-        for n_group, env_tag in zip(es_cfg.env_configs.n_groups, es_cfg.env_configs.tags):
-            new_env_nums[env_tag] = n_group * es_cfg.group_size
-        self.agent_proxy.val_ctx_manager.env_nums = new_env_nums
+        # CRITICAL FIX: Create a new ContextManager for this task
+        # The old ctx_manager's prefix_lookup maps env_ids to the WRONG environment instructions
+        # (e.g., all env_ids map to Bandit's instruction even when validating Sokoban)
+        # We need a fresh ctx_manager that uses the correct environment instructions
+        self.agent_proxy.val_ctx_manager = ContextManager(
+            es_manager.sys_config,  # Use the ES manager's full config which has correct env tags
+            self.tokenizer,
+            mode="val"
+        )
         
         try:
             for step in range(self.config.trainer.validation_steps):
@@ -223,9 +226,9 @@ class ContinualLearningAgentTrainer(RayAgentTrainer):
                 data_source_lst.append(data_sources_batch)
                 
         finally:
-            # Restore original ES manager and env_nums
+            # Restore original ES manager and ctx_manager
             self.agent_proxy.val_es_manager = original_val_es
-            self.agent_proxy.val_ctx_manager.env_nums = original_env_nums
+            self.agent_proxy.val_ctx_manager = original_val_ctx
         
         # Process metrics
         data_sources = np.concatenate(data_source_lst, axis=0)

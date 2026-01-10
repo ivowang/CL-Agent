@@ -1,15 +1,15 @@
 """
 Mix Trainer for RAGEN
 
-This trainer implements multi-task interleaved training where the agent
-trains on multiple environments in a round-robin fashion. After each
-training step, the environment is switched to the next one in the cycle.
+This trainer implements multi-task mixed training where the agent
+trains on multiple environments simultaneously in each batch. Each
+parallel sampling step includes samples from all environments mixed together.
 
 Key features:
-- Environment cycling: env1 → env2 → env3 → env1 → ...
+- All environments are mixed in each training batch
 - Single shared LoRA module for all environments
 - Validation on all environments at each validation step
-- Proper logging per environment
+- Proper per-environment metrics logging
 """
 
 import os
@@ -46,17 +46,17 @@ from ragen.cl_methods.mix import MixCLMethod
 
 class MixAgentTrainer(RayAgentTrainer):
     """
-    Multi-task interleaved trainer.
+    Multi-task mixed trainer.
     
-    This trainer cycles through multiple environments, training one step
-    on each before switching to the next. All environments share the
-    same LoRA parameters.
+    This trainer samples from all environments simultaneously in each batch,
+    mixing different environment samples together. All environments share
+    the same LoRA parameters.
     """
     
     def __init__(self, *args, mix_method: MixCLMethod = None, env_configs: List[Dict] = None, **kwargs):
         """
         Args:
-            mix_method: The MixCLMethod instance managing environment cycling
+            mix_method: The MixCLMethod instance (used for tracking, not cycling)
             env_configs: List of environment configurations, each containing:
                 - name: Environment name (e.g., 'bandit', 'sokoban', 'frozen_lake')
                 - train_tags: List of training env tags
@@ -68,36 +68,57 @@ class MixAgentTrainer(RayAgentTrainer):
         self.mix_method = mix_method
         self.env_configs = env_configs or []
         
-        # Create ES managers for each environment
-        self.train_es_managers: Dict[str, EnvStateManager] = {}
+        # Validation ES managers (one per environment for separate validation)
         self.val_es_managers: Dict[str, EnvStateManager] = {}
         
         # Track metrics per environment
         self.env_metrics: Dict[str, Dict[str, List]] = defaultdict(lambda: defaultdict(list))
         
     def init_mix_environments(self):
-        """Initialize ES managers for all environments."""
+        """Initialize ES managers: one mixed ES manager for training, separate ones for validation."""
         if not self.env_configs:
             print("[Mix] Warning: No environment configs provided")
             return
             
-        print(f"[Mix] Initializing {len(self.env_configs)} environments")
+        print(f"[Mix] Initializing mixed training with {len(self.env_configs)} environments")
         
+        # === Create a SINGLE mixed training ES manager with ALL environments ===
+        all_train_tags = []
+        all_train_n_groups = []
+        
+        for env_config in self.env_configs:
+            all_train_tags.extend(env_config['train_tags'])
+            all_train_n_groups.extend(env_config['train_n_groups'])
+        
+        # Create mixed training config
+        mixed_train_config = deepcopy(self.config)
+        with open_dict(mixed_train_config):
+            mixed_train_config.es_manager.train.env_configs.tags = all_train_tags
+            mixed_train_config.es_manager.train.env_configs.n_groups = all_train_n_groups
+            mixed_train_config.es_manager.train.env_groups = sum(all_train_n_groups)
+        
+        # Create the single mixed training ES manager
+        self.mixed_train_es_manager = EnvStateManager(mixed_train_config, mode="train")
+        print(f"[Mix] Created MIXED training ES manager with tags={all_train_tags}, n_groups={all_train_n_groups}")
+        print(f"[Mix] Total training env instances: {sum(all_train_n_groups)} groups × {mixed_train_config.es_manager.train.group_size} = {sum(all_train_n_groups) * mixed_train_config.es_manager.train.group_size}")
+        
+        # Update agent proxy to use the mixed ES manager
+        self.agent_proxy.train_es_manager = self.mixed_train_es_manager
+        
+        # Update ctx_manager's env_nums for proper metric normalization
+        new_env_nums = {}
+        for n_group, env_tag in zip(all_train_n_groups, all_train_tags):
+            if env_tag in new_env_nums:
+                new_env_nums[env_tag] += n_group * self.mixed_train_es_manager.group_size
+            else:
+                new_env_nums[env_tag] = n_group * self.mixed_train_es_manager.group_size
+        self.agent_proxy.train_ctx_manager.env_nums = new_env_nums
+        print(f"[Mix] Updated env_nums for training: {new_env_nums}")
+        
+        # === Create SEPARATE validation ES managers for each environment ===
         for env_config in self.env_configs:
             env_name = env_config['name']
             
-            # Create training ES manager for this environment
-            train_config = deepcopy(self.config)
-            with open_dict(train_config):
-                train_config.es_manager.train.env_configs.tags = list(env_config['train_tags'])
-                train_config.es_manager.train.env_configs.n_groups = list(env_config['train_n_groups'])
-                train_config.es_manager.train.env_groups = sum(env_config['train_n_groups'])
-            
-            train_es = EnvStateManager(train_config, mode="train")
-            self.train_es_managers[env_name] = train_es
-            print(f"[Mix] Created training ES manager for {env_name}: tags={env_config['train_tags']}")
-            
-            # Create validation ES manager for this environment
             val_config = deepcopy(self.config)
             with open_dict(val_config):
                 val_config.es_manager.val.env_configs.tags = list(env_config['val_tags'])
@@ -108,57 +129,30 @@ class MixAgentTrainer(RayAgentTrainer):
             self.val_es_managers[env_name] = val_es
             print(f"[Mix] Created validation ES manager for {env_name}: tags={env_config['val_tags']}")
     
-    def _get_current_env_name(self) -> str:
-        """Get the name of the current environment from mix_method."""
-        if self.mix_method:
-            idx = self.mix_method.get_current_env_idx()
-            if idx < len(self.env_configs):
-                return self.env_configs[idx]['name']
-        return self.env_configs[0]['name'] if self.env_configs else 'unknown'
-    
-    def _switch_to_env(self, env_name: str):
-        """Switch the agent proxy to use a specific environment's ES managers."""
-        if env_name not in self.train_es_managers:
-            print(f"[Mix] Warning: Unknown environment {env_name}")
-            return
-            
-        # Update agent proxy's ES managers
-        self.agent_proxy.train_es_manager = self.train_es_managers[env_name]
-        
-        # Also update ctx_manager's env_nums for proper metric normalization
-        train_es = self.train_es_managers[env_name]
-        new_env_nums = {}
-        for n_group, env_tag in zip(
-            train_es.config.env_configs.n_groups, 
-            train_es.config.env_configs.tags
-        ):
-            new_env_nums[env_tag] = n_group * train_es.group_size
-        self.agent_proxy.train_ctx_manager.env_nums = new_env_nums
-        
-        print(f"[Mix] Switched training to environment: {env_name}")
-    
     def _validate_all_envs(self) -> Dict[str, Any]:
-        """Validate on all environments and return combined metrics."""
+        """Validate on all environments separately and return combined metrics."""
+        from ragen.llm_agent.ctx_manager import ContextManager
+        
         all_metrics = {}
         
         for env_name, val_es_manager in self.val_es_managers.items():
             print(f"[Mix] Validating on environment: {env_name}")
             
-            # Store original ES managers and env_nums
+            # Store original ES manager and ctx_manager
             original_val_es = self.agent_proxy.val_es_manager
-            original_env_nums = self.agent_proxy.val_ctx_manager.env_nums.copy()
+            original_val_ctx = self.agent_proxy.val_ctx_manager
             
             # Temporarily switch to this environment's validation ES manager
             self.agent_proxy.val_es_manager = val_es_manager
             
-            # Update ctx_manager's env_nums
-            new_env_nums = {}
-            for n_group, env_tag in zip(
-                val_es_manager.config.env_configs.n_groups,
-                val_es_manager.config.env_configs.tags
-            ):
-                new_env_nums[env_tag] = n_group * val_es_manager.group_size
-            self.agent_proxy.val_ctx_manager.env_nums = new_env_nums
+            # CRITICAL FIX: Create a new ContextManager for this environment
+            # The old ctx_manager's prefix_lookup maps env_ids to the WRONG environment instructions
+            # We need a fresh ctx_manager that knows about this specific environment
+            self.agent_proxy.val_ctx_manager = ContextManager(
+                val_es_manager.sys_config,  # Use the ES manager's full config
+                self.tokenizer,
+                mode="val"
+            )
             
             try:
                 # Run validation
@@ -170,9 +164,9 @@ class MixAgentTrainer(RayAgentTrainer):
                     all_metrics[prefixed_key] = value
                     
             finally:
-                # Restore original ES managers and env_nums
+                # Restore original ES manager and ctx_manager
                 self.agent_proxy.val_es_manager = original_val_es
-                self.agent_proxy.val_ctx_manager.env_nums = original_env_nums
+                self.agent_proxy.val_ctx_manager = original_val_ctx
         
         return all_metrics
     
@@ -243,23 +237,20 @@ class MixAgentTrainer(RayAgentTrainer):
     
     def fit(self):
         """
-        Main training loop with environment cycling.
+        Main training loop with mixed-environment sampling.
         
-        After each training step, switches to the next environment in the cycle.
+        Each training step samples from ALL environments mixed together,
+        then uses the combined batch to update the shared LoRA parameters.
         """
         self.global_steps = self.config.trainer.get("start_step", 0)
         self.start_time = time.time()
         
-        # Initialize multi-environment setup
+        # Initialize multi-environment setup (single mixed ES manager)
         self.init_mix_environments()
-        
-        # Set initial environment
-        current_env_name = self._get_current_env_name()
-        self._switch_to_env(current_env_name)
         
         progress_bar = tqdm(
             range(self.global_steps, self.total_training_steps),
-            desc="Training (Mix)",
+            desc="Training (Mixed)",
             initial=self.global_steps,
             total=self.total_training_steps,
         )
@@ -280,6 +271,10 @@ class MixAgentTrainer(RayAgentTrainer):
         
         last_val_metrics = {}
         
+        # Get environment names for logging
+        env_names = [env_config['name'] for env_config in self.env_configs]
+        print(f"[Mix] Training with mixed environments: {env_names}")
+        
         for step in progress_bar:
             is_last_step = step == self.total_training_steps - 1
             timing_raw = {}
@@ -287,19 +282,13 @@ class MixAgentTrainer(RayAgentTrainer):
             
             # Wrap entire step in timing context (required by compute_throughout_metrics)
             with marked_timer("step", timing_raw):
-                # Get current environment
-                current_env_name = self._get_current_env_name()
-                metrics["mix/current_env_idx"] = self.mix_method.get_current_env_idx() if self.mix_method else 0
-                metrics["mix/current_env"] = current_env_name
+                # Log that this is a mixed batch
+                metrics["mix/batch_type"] = "mixed"
+                metrics["mix/num_environments"] = len(self.env_configs)
                 
-                # Log steps per environment
-                if self.mix_method:
-                    for env_tag, count in self.mix_method.steps_per_env.items():
-                        metrics[f"mix/steps_{env_tag}"] = count
-                
-                # === Training Step ===
+                # === Training Step (mixed batch from all environments) ===
                 with marked_timer("gen", timing_raw, color="green"):
-                    # Rollout on current environment
+                    # Rollout on ALL environments mixed together
                     meta_info = {
                         "eos_token_id": self.tokenizer.eos_token_id,
                         "pad_token_id": self.tokenizer.pad_token_id,
@@ -310,10 +299,11 @@ class MixAgentTrainer(RayAgentTrainer):
                     gen_batch = DataProto(batch=None, non_tensor_batch=None, meta_info=meta_info)
                     batch = self.agent_proxy.rollout(gen_batch, val=False)
                     
-                    # Log training metrics for current environment
+                    # Log training metrics (now includes all environments)
                     if "metrics" in batch.meta_info:
                         for key, value in batch.meta_info["metrics"].items():
-                            metrics[f"train_{current_env_name}/{key}"] = value
+                            # Log with "train_mixed" prefix for combined metrics
+                            metrics[f"train_mixed/{key}"] = value
                 
                 # Prepare batch for training
                 batch.non_tensor_batch["uid"] = batch.non_tensor_batch["group_ids"]
@@ -421,11 +411,7 @@ class MixAgentTrainer(RayAgentTrainer):
                     with marked_timer("save_checkpoint", timing_raw):
                         self._save_checkpoint()
                 
-                # === Switch to next environment ===
-                if self.mix_method:
-                    next_env_tag = self.mix_method.advance_to_next_env()
-                    next_env_name = self._get_current_env_name()
-                    self._switch_to_env(next_env_name)
+                # No environment switching needed - we sample from all environments each step
             
             # Collect and log metrics (outside of step timer)
             metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))

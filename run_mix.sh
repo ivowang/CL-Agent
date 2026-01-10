@@ -2,14 +2,15 @@
 #
 # Mix Training Script for RAGEN
 #
-# This script runs multi-task interleaved training where the agent
-# trains on multiple environments in a round-robin fashion. After each
-# training step, the environment is switched to the next one in the cycle.
+# This script runs multi-task mixed training where the agent trains on
+# ALL environments SIMULTANEOUSLY in each batch. Each parallel sampling
+# step includes samples from all environments mixed together.
 #
 # Key differences from continual learning:
-# - All environments are trained simultaneously (interleaved)
+# - All environments are mixed in each training batch
 # - Single shared LoRA module for all environments
-# - Environment cycle: env1 → env2 → env3 → env1 → ...
+# - Each batch contains samples from Bandit, Sokoban, and Frozen Lake
+# - No environment cycling or sequential task ordering
 #
 # Checkpoint structure:
 #   checkpoints/mix/{timestamp}/global_step_{N}/

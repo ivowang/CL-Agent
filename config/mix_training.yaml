@@ -1,13 +1,15 @@
 # Mix Training Configuration for RAGEN
 #
-# This config enables multi-task interleaved training where the agent
-# trains on multiple environments in a round-robin fashion. After each
-# training step, the environment is switched to the next one in the cycle.
+# This config enables multi-task mixed training where the agent
+# trains on ALL environments SIMULTANEOUSLY in each batch. Each
+# parallel sampling step includes samples from all environments
+# mixed together, and the combined batch is used to update parameters.
 #
 # Key differences from continual learning:
-# - All environments are trained simultaneously (interleaved)
+# - All environments are mixed in each training batch
 # - Single shared LoRA module for all environments
-# - No sequential task ordering
+# - No sequential task ordering, no environment cycling
+# - Each batch contains samples from Bandit, Sokoban, and Frozen Lake
 #
 # Checkpoint structure:
 #   checkpoints/mix/{timestamp}/global_step_{N}/
@@ -45,45 +47,48 @@ mix_training:
   # Method name (for logging)
   method_name: mix
   
-  # List of environments to cycle through
-  # Each environment will get approximately total_steps / num_envs training steps
+  # List of environments to mix in each training batch
+  # All environments are sampled simultaneously in each step
+  # n_groups determines how many groups of each environment type per batch
   environments:
     - name: bandit
       train_tags: ["Bandit"]
-      train_n_groups: [8]
+      train_n_groups: [4]         # 4 groups × 16 = 64 samples per batch
       val_tags: ["Bandit"]
       val_n_groups: [32]
     
     - name: sokoban
       train_tags: ["CoordSokoban"]
-      train_n_groups: [8]
+      train_n_groups: [4]         # 4 groups × 16 = 64 samples per batch
       val_tags: ["CoordSokoban"]
       val_n_groups: [32]
     
     - name: frozen_lake
       train_tags: ["CoordFrozenLake"]
-      train_n_groups: [8]
+      train_n_groups: [4]         # 4 groups × 16 = 64 samples per batch
       val_tags: ["CoordFrozenLake"]
       val_n_groups: [32]
+  # Total per batch: 3 envs × 64 = 192 samples
 
 # Agent proxy settings
 agent_proxy:
   max_turn: 5
   max_actions_per_turn: 2
 
-# ES Manager settings (initial configuration, will be overridden per step)
+# ES Manager settings (initial placeholder, will be overridden to include all envs)
+# The actual mixed config is built dynamically in mix_trainer.py
 es_manager:
   train:
-    env_groups: 8
+    env_groups: 12              # Total: 4+4+4 = 12 groups for mixed training
     group_size: 16
     env_configs:
-      tags: ["Bandit"]
-      n_groups: [8]
+      tags: ["Bandit", "CoordSokoban", "CoordFrozenLake"]
+      n_groups: [4, 4, 4]       # 4 groups each = 12 total
   val:
     env_groups: 32
     group_size: 16
     env_configs:
-      tags: ["Bandit"]
+      tags: ["Bandit"]          # Validation done separately per env
       n_groups: [32]
 
 # Rollout settings
