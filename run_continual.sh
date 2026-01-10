@@ -9,8 +9,12 @@
 #   checkpoints/baseline/{timestamp}/global_step_{N}/
 #
 # Usage:
-#   # Train from scratch
+#   # Train from scratch (default order: Bandit -> Sokoban -> Frozen Lake)
 #   bash run_continual.sh
+#
+#   # Train with custom task order
+#   TASK_ORDER=102 bash run_continual.sh  # Sokoban -> Bandit -> Frozen Lake
+#   TASK_ORDER=210 bash run_continual.sh  # Frozen Lake -> Sokoban -> Bandit
 #
 #   # Resume from checkpoint
 #   RESUME_CHECKPOINT=/path/to/checkpoint bash run_continual.sh
@@ -25,17 +29,29 @@ set -e
 # micromamba activate ragen
 
 # Configuration
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-4,5,6,7}"
 export WANDB_MODE="${WANDB_MODE:-online}"
+# Offline mode for HuggingFace to avoid network issues when loading local models
+# export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+# export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 
 # Optional: Resume from checkpoint
 RESUME_CHECKPOINT="${RESUME_CHECKPOINT:-}"
+
+# Optional: Task order (e.g., "012", "102", "210")
+# 0=Bandit, 1=Sokoban, 2=Frozen Lake
+TASK_ORDER="${TASK_ORDER:-}"
 
 echo "=============================================="
 echo "RAGEN Continual Learning - Baseline Method"
 echo "=============================================="
 echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
 echo "WANDB_MODE: ${WANDB_MODE}"
+if [ -n "$TASK_ORDER" ]; then
+    echo "Task order: ${TASK_ORDER}"
+else
+    echo "Task order: default (012 = Bandit -> Sokoban -> Frozen Lake)"
+fi
 if [ -n "$RESUME_CHECKPOINT" ]; then
     echo "Resume checkpoint: ${RESUME_CHECKPOINT}"
 fi
@@ -46,6 +62,11 @@ CMD="python train_continual.py --config-name continual_learning"
 
 # Add system config - use escaped quotes for Hydra string values
 CMD="$CMD \"system.CUDA_VISIBLE_DEVICES='${CUDA_VISIBLE_DEVICES}'\""
+
+# Add task order if specified
+if [ -n "$TASK_ORDER" ]; then
+    CMD="$CMD \"continual_learning.task_order='${TASK_ORDER}'\""
+fi
 
 # Add resume checkpoint if specified
 if [ -n "$RESUME_CHECKPOINT" ]; then

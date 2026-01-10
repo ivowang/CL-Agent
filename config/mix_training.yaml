@@ -1,0 +1,97 @@
+# Mix Training Configuration for RAGEN
+#
+# This config enables multi-task interleaved training where the agent
+# trains on multiple environments in a round-robin fashion. After each
+# training step, the environment is switched to the next one in the cycle.
+#
+# Key differences from continual learning:
+# - All environments are trained simultaneously (interleaved)
+# - Single shared LoRA module for all environments
+# - No sequential task ordering
+#
+# Checkpoint structure:
+#   checkpoints/mix/{timestamp}/global_step_{N}/
+#
+# Usage:
+#   python train_mix.py --config-name mix_training
+#   or
+#   bash run_mix.sh
+#
+# With custom parameters:
+#   bash run_mix.sh CUDA_VISIBLE_DEVICES=0,1,2,3 TOTAL_STEPS=300
+
+defaults:
+  - base
+  - _self_
+
+# Override base settings for mix training
+trainer:
+  project_name: ragen_mix_training
+  experiment_name: mix
+  total_training_steps: 300  # Total steps across all environments
+  test_freq: 10  # Validate every 10 steps on all environments
+  save_freq: 100  # Save checkpoint every 100 steps
+  val_before_train: True
+  generations_to_log_to_wandb:
+    val: 20
+  logger: ['console', 'wandb']
+  max_actor_ckpt_to_keep: 3
+  max_critic_ckpt_to_keep: 3
+  resume_mode: disable
+  default_local_dir: checkpoints/mix
+
+# Mix training specific settings
+mix_training:
+  # Method name (for logging)
+  method_name: mix
+  
+  # List of environments to cycle through
+  # Each environment will get approximately total_steps / num_envs training steps
+  environments:
+    - name: bandit
+      train_tags: ["Bandit"]
+      train_n_groups: [8]
+      val_tags: ["Bandit"]
+      val_n_groups: [32]
+    
+    - name: sokoban
+      train_tags: ["CoordSokoban"]
+      train_n_groups: [8]
+      val_tags: ["CoordSokoban"]
+      val_n_groups: [32]
+    
+    - name: frozen_lake
+      train_tags: ["CoordFrozenLake"]
+      train_n_groups: [8]
+      val_tags: ["CoordFrozenLake"]
+      val_n_groups: [32]
+
+# Agent proxy settings
+agent_proxy:
+  max_turn: 5
+  max_actions_per_turn: 2
+
+# ES Manager settings (initial configuration, will be overridden per step)
+es_manager:
+  train:
+    env_groups: 8
+    group_size: 16
+    env_configs:
+      tags: ["Bandit"]
+      n_groups: [8]
+  val:
+    env_groups: 32
+    group_size: 16
+    env_configs:
+      tags: ["Bandit"]
+      n_groups: [32]
+
+# Rollout settings
+actor_rollout_ref:
+  rollout:
+    response_length: 500
+    # Lower GPU memory utilization to be safe with multi-env switching
+    gpu_memory_utilization: 0.4
+    val_kwargs:
+      do_sample: True
+      temperature: 0.5

@@ -50,6 +50,15 @@ continual_learning:
   # The task is determined by: global_step // steps_per_task
   resume_checkpoint: null
   
+  # Task order (optional)
+  # Use a string of indices to specify the training order of tasks
+  # Examples:
+  #   "012" - Default order: Bandit -> Sokoban -> Frozen Lake
+  #   "102" - Order: Sokoban -> Bandit -> Frozen Lake
+  #   "210" - Order: Frozen Lake -> Sokoban -> Bandit
+  # If not set or null, uses default order (same as "012")
+  task_order: null
+  
   # CL Method configuration
   method:
     name: olora
@@ -58,7 +67,7 @@ continual_learning:
     lambda_l2: 0.0     # Weight for L2 regularization
     lora_rank: 64      # LoRA rank per task
   
-  # Tasks to train sequentially
+  # Tasks to train sequentially (order can be changed via task_order)
   tasks:
     - name: bandit
       train_tags: ["Bandit"]
@@ -102,6 +111,8 @@ es_manager:
 actor_rollout_ref:
   rollout:
     response_length: 500
+    # Lower GPU memory utilization to avoid conflicts with CL loss computation
+    gpu_memory_utilization: 0.4
     val_kwargs:
       do_sample: True
       temperature: 0.5

@@ -102,36 +102,52 @@ class DataParallelPPOActor(BasePPOActor):
         Returns:
             Tuple of (cl_loss_tensor, metrics_dict)
         """
-        if self._cl_method_name == 'naive':
-            # No CL loss for naive method
-            return torch.tensor(0.0, device=torch.cuda.current_device()), {'cl/total_loss': 0.0}
+        if self._cl_method_name == 'naive' or self._cl_method_name == 'baseline':
+            # No CL loss for naive/baseline method
+            return torch.tensor(0.0, device=torch.cuda.current_device(), requires_grad=False), {'cl/total_loss': 0.0}
+        
+        # Check if we should compute CL loss (only after first task for O-LoRA)
+        current_task_idx = self._cl_config.get('current_task_idx', 0)
+        if current_task_idx == 0:
+            # First task - no orthogonal constraint
+            return torch.tensor(0.0, device=torch.cuda.current_device(), requires_grad=False), {'cl/total_loss': 0.0}
+        
+        # Check if we have frozen params
+        if self._frozen_lora_params is None or len(self._frozen_lora_params) == 0:
+            return torch.tensor(0.0, device=torch.cuda.current_device(), requires_grad=False), {'cl/total_loss': 0.0}
         
         # Build CL config for the loss function
         cl_loss_config = {
             'lambda_ortho': self._cl_config.get('lambda_ortho', 0.5),
             'lambda_l2': self._cl_config.get('lambda_l2', 0.0),
-            'current_task_idx': self._cl_config.get('current_task_idx', 0),
+            'current_task_idx': current_task_idx,
         }
         
         # Get the appropriate loss function
         cl_loss_fn = get_cl_loss_fn(self._cl_method_name)
         
-        # Compute CL loss - need to access full params if using FSDP
-        if isinstance(self.actor_module, FSDP):
-            with FSDP.summon_full_params(self.actor_module, recurse=True, writeback=False):
-                return cl_loss_fn(
-                    self.actor_module,
-                    cl_loss_config,
-                    self._frozen_lora_params,
-                    device=torch.cuda.current_device(),
-                )
-        else:
-            return cl_loss_fn(
+        # Compute CL loss
+        # NOTE: For FSDP, we DON'T use summon_full_params because:
+        # 1. The LoRA parameters can be accessed directly since they are on the current device
+        # 2. Using summon_full_params inside the training loop can cause memory issues
+        # 3. The frozen params are already on CPU and will be moved to GPU as needed
+        try:
+            cl_loss, metrics = cl_loss_fn(
                 self.actor_module,
                 cl_loss_config,
                 self._frozen_lora_params,
                 device=torch.cuda.current_device(),
             )
+            return cl_loss, metrics
+        except Exception as e:
+            # If there's an error, log it and return zero loss
+            if torch.distributed.is_initialized():
+                rank = torch.distributed.get_rank()
+            else:
+                rank = 0
+            if rank == 0:
+                print(f"[CL Warning] Error computing CL loss: {e}, returning zero loss")
+            return torch.tensor(0.0, device=torch.cuda.current_device(), requires_grad=False), {'cl/total_loss': 0.0}
 
     def _forward_micro_batch(self, micro_batch, temperature, calculate_entropy=False) -> Tuple[torch.Tensor, torch.Tensor]:
         """

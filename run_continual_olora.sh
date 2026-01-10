@@ -9,8 +9,12 @@
 #   checkpoints/olora/{timestamp}/global_step_{N}/
 #
 # Usage:
-#   # Train from scratch
+#   # Train from scratch (default order: Bandit -> Sokoban -> Frozen Lake)
 #   bash run_continual_olora.sh
+#
+#   # Train with custom task order
+#   TASK_ORDER=102 bash run_continual_olora.sh  # Sokoban -> Bandit -> Frozen Lake
+#   TASK_ORDER=210 bash run_continual_olora.sh  # Frozen Lake -> Sokoban -> Bandit
 #
 #   # Resume from checkpoint
 #   RESUME_CHECKPOINT=/path/to/checkpoint bash run_continual_olora.sh
@@ -28,8 +32,11 @@ set -e
 # micromamba activate ragen
 
 # Configuration
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-4,5,6,7}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 export WANDB_MODE="${WANDB_MODE:-online}"
+# Offline mode for HuggingFace to avoid network issues when loading local models
+# export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+# export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 
 # O-LoRA parameters
 LAMBDA_ORTHO="${LAMBDA_ORTHO:-0.5}"
@@ -38,6 +45,10 @@ LORA_RANK="${LORA_RANK:-64}"
 
 # Optional: Resume from checkpoint
 RESUME_CHECKPOINT="${RESUME_CHECKPOINT:-}"
+
+# Optional: Task order (e.g., "012", "102", "210")
+# 0=Bandit, 1=Sokoban, 2=Frozen Lake
+TASK_ORDER="${TASK_ORDER:-}"
 
 echo "=============================================="
 echo "RAGEN Continual Learning - O-LoRA Method"
@@ -48,6 +59,11 @@ echo "O-LoRA Parameters:"
 echo "  - lambda_ortho: ${LAMBDA_ORTHO}"
 echo "  - lambda_l2: ${LAMBDA_L2}"
 echo "  - lora_rank: ${LORA_RANK}"
+if [ -n "$TASK_ORDER" ]; then
+    echo "Task order: ${TASK_ORDER}"
+else
+    echo "Task order: default (012 = Bandit -> Sokoban -> Frozen Lake)"
+fi
 if [ -n "$RESUME_CHECKPOINT" ]; then
     echo "Resume checkpoint: ${RESUME_CHECKPOINT}"
 fi
@@ -63,6 +79,11 @@ CMD="$CMD \"system.CUDA_VISIBLE_DEVICES='${CUDA_VISIBLE_DEVICES}'\""
 CMD="$CMD continual_learning.method.lambda_ortho=${LAMBDA_ORTHO}"
 CMD="$CMD continual_learning.method.lambda_l2=${LAMBDA_L2}"
 CMD="$CMD continual_learning.method.lora_rank=${LORA_RANK}"
+
+# Add task order if specified
+if [ -n "$TASK_ORDER" ]; then
+    CMD="$CMD \"continual_learning.task_order='${TASK_ORDER}'\""
+fi
 
 # Add resume checkpoint if specified
 if [ -n "$RESUME_CHECKPOINT" ]; then

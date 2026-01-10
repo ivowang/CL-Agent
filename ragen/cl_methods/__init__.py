@@ -10,12 +10,14 @@ Each method handles:
 Available methods:
 - naive: Shared LoRA across all tasks (baseline)
 - olora: Orthogonal Low-Rank Adaptation (O-LoRA)
+- mix: Multi-task interleaved training (all tasks simultaneously)
 """
 
 from .registry import CL_METHODS, register_cl_method, get_cl_method
 from .base import BaseCLMethod
 from .naive import NaiveCLMethod
 from .olora import OLoRACLMethod
+from .mix import MixCLMethod
 from .loss_functions import (
     compute_olora_loss,
     get_cl_loss_fn,
@@ -30,6 +32,7 @@ __all__ = [
     'BaseCLMethod',
     'NaiveCLMethod',
     'OLoRACLMethod',
+    'MixCLMethod',
     # Loss functions
     'compute_olora_loss',
     'get_cl_loss_fn',

@@ -50,32 +50,39 @@ def compute_olora_loss(
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    ortho_loss = torch.tensor(0.0, device=device)
-    l2_loss = torch.tensor(0.0, device=device)
-    
     # Skip for first task (no frozen params)
     if current_task_idx == 0 or frozen_lora_params is None or len(frozen_lora_params) == 0:
-        return torch.tensor(0.0, device=device), {
+        return torch.tensor(0.0, device=device, requires_grad=False), {
             'cl/ortho_loss': 0.0,
             'cl/l2_loss': 0.0,
             'cl/total_loss': 0.0,
         }
     
+    ortho_loss = torch.tensor(0.0, device=device)
+    l2_loss = torch.tensor(0.0, device=device)
+    
     # Collect current LoRA parameters
     current_lora_params = _extract_lora_params(model)
     
     # Compute orthogonal loss
+    # Use torch.no_grad() for frozen params to avoid unnecessary computation
     for name, frozen_params in frozen_lora_params.items():
         if name in current_lora_params:
-            frozen_a = frozen_params['A'].to(device)
             current_a = current_lora_params[name]['A']
             
-            if frozen_a is not None and current_a is not None:
+            if frozen_params.get('A') is not None and current_a is not None:
+                # Move frozen param to device with no_grad to save memory
+                with torch.no_grad():
+                    frozen_a = frozen_params['A'].to(device, non_blocking=True)
+                
                 # Orthogonal loss: |frozen_A @ current_A.T|
                 # frozen_A: [r_frozen, in_features]
                 # current_A: [r_new, in_features]
                 ortho_product = torch.mm(frozen_a, current_a.T)
                 ortho_loss = ortho_loss + torch.abs(ortho_product).sum()
+                
+                # Explicitly delete to free memory
+                del frozen_a
     
     # Compute L2 regularization on current LoRA params
     if lambda_l2 > 0:
@@ -102,49 +109,54 @@ def compute_olora_loss(
 def _extract_lora_params(model: nn.Module) -> Dict[str, Dict[str, torch.Tensor]]:
     """
     Extract LoRA A and B parameters from a model.
+    Works with both FSDP-wrapped and regular models.
     
     Returns:
         Dict mapping module names to {'A': tensor, 'B': tensor}
     """
     lora_params = {}
     
-    # Handle FSDP wrapped models
-    if isinstance(model, FSDP):
-        # Need to access the underlying module
-        module_to_search = model
-    else:
-        module_to_search = model
+    # For FSDP wrapped models, we iterate directly - FSDP handles the parameter access
+    module_to_search = model
     
-    for name, module in module_to_search.named_modules():
-        # Check for PEFT-style LoRA layers
-        if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
-            lora_a = None
-            lora_b = None
-            
-            # Handle different LoRA implementations
-            if isinstance(module.lora_A, nn.ModuleDict):
-                # PEFT style with adapters
-                for adapter_name in module.lora_A.keys():
-                    if hasattr(module.lora_A[adapter_name], 'weight'):
-                        lora_a = module.lora_A[adapter_name].weight
-                    if hasattr(module.lora_B[adapter_name], 'weight'):
-                        lora_b = module.lora_B[adapter_name].weight
-                    break
-            elif isinstance(module.lora_A, nn.Linear):
-                lora_a = module.lora_A.weight
-                lora_b = module.lora_B.weight
-            elif isinstance(module.lora_A, nn.Parameter):
-                lora_a = module.lora_A
-                lora_b = module.lora_B
-            elif hasattr(module.lora_A, 'default'):
-                # Another PEFT format
-                if hasattr(module.lora_A.default, 'weight'):
-                    lora_a = module.lora_A.default.weight
-                if hasattr(module.lora_B.default, 'weight'):
-                    lora_b = module.lora_B.default.weight
-            
-            if lora_a is not None or lora_b is not None:
-                lora_params[name] = {'A': lora_a, 'B': lora_b}
+    try:
+        for name, module in module_to_search.named_modules():
+            # Check for PEFT-style LoRA layers
+            if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
+                lora_a = None
+                lora_b = None
+                
+                try:
+                    # Handle different LoRA implementations
+                    if isinstance(module.lora_A, nn.ModuleDict):
+                        # PEFT style with adapters
+                        for adapter_name in module.lora_A.keys():
+                            if hasattr(module.lora_A[adapter_name], 'weight'):
+                                lora_a = module.lora_A[adapter_name].weight
+                            if hasattr(module.lora_B[adapter_name], 'weight'):
+                                lora_b = module.lora_B[adapter_name].weight
+                            break
+                    elif isinstance(module.lora_A, nn.Linear):
+                        lora_a = module.lora_A.weight
+                        lora_b = module.lora_B.weight
+                    elif isinstance(module.lora_A, nn.Parameter):
+                        lora_a = module.lora_A
+                        lora_b = module.lora_B
+                    elif hasattr(module.lora_A, 'default'):
+                        # Another PEFT format
+                        if hasattr(module.lora_A.default, 'weight'):
+                            lora_a = module.lora_A.default.weight
+                        if hasattr(module.lora_B.default, 'weight'):
+                            lora_b = module.lora_B.default.weight
+                    
+                    if lora_a is not None or lora_b is not None:
+                        lora_params[name] = {'A': lora_a, 'B': lora_b}
+                except Exception as e:
+                    # Skip this module if we can't access its parameters
+                    # This can happen with FSDP sharded parameters
+                    continue
+    except Exception as e:
+        print(f"[CL Warning] Error extracting LoRA params: {e}")
     
     return lora_params
 

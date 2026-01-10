@@ -224,13 +224,16 @@ def init_cl_method(cl_method_config, task_idx, config, cl_method_state=None):
 
 
 def run_continual_training(config, start_global_step, checkpoint_dir, timestamp, 
-                           all_env_configs, cl_method_config, cl_method_state=None,
+                           all_env_configs, cl_method_config, tasks, cl_method_state=None,
                            resume_checkpoint=None):
     """
     Run continual training from a given starting step.
     
     This function handles the entire training loop across all tasks,
     automatically switching tasks when steps_per_task is reached.
+    
+    Args:
+        tasks: List of task configs (already reordered if task_order was specified)
     """
     from verl.utils.fs import copy_to_local
     from verl.utils import hf_tokenizer, hf_processor
@@ -240,7 +243,7 @@ def run_continual_training(config, start_global_step, checkpoint_dir, timestamp,
     from ragen.trainer.cl_agent_trainer import ContinualLearningAgentTrainer
     
     cl_config = config.continual_learning
-    tasks = list(cl_config.tasks)
+    # Use the tasks passed in (already reordered), not from config
     steps_per_task = cl_config.steps_per_task
     total_tasks = len(tasks)
     total_steps = steps_per_task * total_tasks
@@ -305,7 +308,8 @@ def run_continual_training(config, start_global_step, checkpoint_dir, timestamp,
             # from checkpoint, global_steps is restored from the checkpoint,
             # and the trainer checks: is_last_step = global_steps >= total_training_steps
             task_config.trainer.total_training_steps = target_global_step
-            task_config.trainer.experiment_name = f"{cl_config.experiment_name}_{method_name}"
+            # WandB run name: timestamp_method_taskname
+            task_config.trainer.experiment_name = f"{timestamp}_{method_name}_{task_name}"
             
             # Update environment configs
             task_config.es_manager.train.env_configs.tags = list(task.train_tags)
@@ -432,6 +436,47 @@ def run_continual_training(config, start_global_step, checkpoint_dir, timestamp,
     print(f"{'=' * 60}\n")
 
 
+def reorder_tasks_by_order_string(tasks, order_string):
+    """
+    Reorder tasks based on an order string like "012", "102", "210", etc.
+    
+    Args:
+        tasks: List of task configs
+        order_string: String of indices like "012", "102", "210"
+        
+    Returns:
+        Reordered list of tasks
+    """
+    if order_string is None or order_string == "":
+        return tasks
+    
+    # Validate order string
+    order_string = str(order_string).strip()
+    if len(order_string) != len(tasks):
+        raise ValueError(
+            f"Task order string '{order_string}' length ({len(order_string)}) "
+            f"doesn't match number of tasks ({len(tasks)})"
+        )
+    
+    try:
+        indices = [int(c) for c in order_string]
+    except ValueError:
+        raise ValueError(f"Task order string '{order_string}' must contain only digits")
+    
+    # Check indices are valid
+    expected_indices = set(range(len(tasks)))
+    provided_indices = set(indices)
+    if provided_indices != expected_indices:
+        raise ValueError(
+            f"Task order string '{order_string}' must contain each index 0-{len(tasks)-1} exactly once. "
+            f"Expected: {sorted(expected_indices)}, Got: {sorted(provided_indices)}"
+        )
+    
+    # Reorder tasks
+    reordered = [tasks[i] for i in indices]
+    return reordered
+
+
 @hydra.main(version_base=None, config_path="config", config_name="continual_learning")
 def main(config):
     """
@@ -440,6 +485,17 @@ def main(config):
     """
     cl_config = config.continual_learning
     tasks = list(cl_config.tasks)
+    
+    # Apply task order if specified (e.g., "012", "102", "210")
+    task_order = getattr(cl_config, 'task_order', None)
+    if task_order:
+        original_order = [t.name for t in tasks]
+        tasks = reorder_tasks_by_order_string(tasks, task_order)
+        new_order = [t.name for t in tasks]
+        print(f"[CL] Task order applied: {task_order}")
+        print(f"[CL] Original order: {original_order}")
+        print(f"[CL] New order: {new_order}")
+    
     steps_per_task = cl_config.steps_per_task
     total_tasks = len(tasks)
     total_steps = steps_per_task * total_tasks
@@ -492,6 +548,7 @@ def main(config):
     if method_name == 'olora':
         print(f"  - lambda_ortho: {cl_method_config.get('lambda_ortho', 0.5)}")
         print(f"  - lambda_l2: {cl_method_config.get('lambda_l2', 0.0)}")
+    print(f"Task order: {task_order if task_order else 'default (012...)'}")
     print(f"Tasks: {[t.name for t in tasks]}")
     print(f"Steps per task: {steps_per_task}")
     print(f"Total steps: {total_steps}")
@@ -512,6 +569,7 @@ def main(config):
         timestamp=timestamp,
         all_env_configs=all_env_configs,
         cl_method_config=cl_method_config,
+        tasks=tasks,  # Pass reordered tasks
         cl_method_state=None,
         resume_checkpoint=resume_checkpoint,
     )

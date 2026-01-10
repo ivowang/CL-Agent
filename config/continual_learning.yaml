@@ -49,12 +49,21 @@ continual_learning:
   # The task is determined by: global_step // steps_per_task
   resume_checkpoint: null
   
+  # Task order (optional)
+  # Use a string of indices to specify the training order of tasks
+  # Examples:
+  #   "012" - Default order: Bandit -> Sokoban -> Frozen Lake
+  #   "102" - Order: Sokoban -> Bandit -> Frozen Lake
+  #   "210" - Order: Frozen Lake -> Sokoban -> Bandit
+  # If not set or null, uses default order (same as "012")
+  task_order: null
+  
   # CL Method configuration (baseline = naive shared LoRA)
   method:
     name: baseline  # or 'naive' (same thing)
   
   # List of tasks to train on sequentially
-  # Order: Bandit -> Sokoban -> Frozen Lake
+  # Order: Bandit -> Sokoban -> Frozen Lake (can be changed via task_order)
   tasks:
     - name: bandit
       train_tags: ["Bandit"]

@@ -1,0 +1,76 @@
+# Experience Replay (ER) Configuration for RAGEN
+#
+# This config enables in-context learning through experience replay.
+# Successful trajectories are collected and used as examples in prompts.
+# No parameter updates - pure in-context learning.
+#
+# Usage:
+#   python train_er.py --config-name experience_replay
+#   or
+#   bash run_er.sh
+#
+# Specify environment:
+#   ENV_TAG=Bandit bash run_er.sh
+#   ENV_TAG=CoordSokoban bash run_er.sh
+#   ENV_TAG=CoordFrozenLake bash run_er.sh
+
+defaults:
+  - base
+
+# Override base settings for Experience Replay
+trainer:
+  project_name: ragen_experience_replay
+  experiment_name: er_bandit
+  total_training_steps: 1000  # Not used directly, training ends when buffer is full
+  test_freq: 1  # Validation handled by ER method
+  save_freq: 1000
+  val_before_train: False  # ER handles its own initial validation
+  generations_to_log_to_wandb:
+    val: 20
+  logger: ['console', 'wandb']
+  resume_mode: disable
+
+# Experience Replay specific settings
+experience_replay:
+  # Environment to train on
+  # Options: Bandit, CoordSokoban, CoordFrozenLake
+  env_tag: Bandit
+  
+  # Buffer settings
+  buffer_size: 20  # N: Maximum experiences to collect before ending
+  val_frequency: 5  # M: Validate every M new experiences
+  
+  # In-context example settings
+  max_examples_in_prompt: 3  # How many examples to include in prompts
+  example_selection: random  # random, recent, or best
+  
+  # Output settings
+  output_dir: results/experience_replay
+
+# Agent proxy settings
+agent_proxy:
+  max_turn: 5
+  max_actions_per_turn: 2
+
+# ES Manager settings - will be dynamically set based on env_tag
+es_manager:
+  train:
+    env_groups: 8
+    group_size: 16
+    env_configs:
+      tags: ["Bandit"]  # Placeholder, will be set by script
+      n_groups: [8]
+  val:
+    env_groups: 32
+    group_size: 16
+    env_configs:
+      tags: ["Bandit"]  # Placeholder, will be set by script
+      n_groups: [32]
+
+# Rollout settings
+actor_rollout_ref:
+  rollout:
+    response_length: 500
+    val_kwargs:
+      do_sample: True
+      temperature: 0.5
