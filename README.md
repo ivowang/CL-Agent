@@ -4,7 +4,7 @@
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-CL-Agent is a research framework for training LLM-based agents using reinforcement learning with a focus on **continual learning** across multiple interactive environments. Built on top of [veRL](https://github.com/volcengine/verl), it provides a modular architecture for implementing and comparing various continual learning strategies.
+CL-Agent is a research framework for training LLM-based agents using reinforcement learning with a focus on **continual learning** across multiple interactive environments. Built on top of [RAGEN](https://github.com/mll-lab-nu/RAGEN), it provides a modular architecture for implementing and comparing various continual learning strategies.
 
 ## Table of Contents
 
