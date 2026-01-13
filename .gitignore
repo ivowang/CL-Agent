@@ -17,7 +17,6 @@ tensorflow/my_graph/*
 .idea/
 # C extensions
 *.so
-data
 results/
 
 # Distribution / packaging
@@ -117,3 +116,5 @@ tests/e2e/toy_examples/deepspeed/synchronous/output.txt
 
 
 log/
+
+external/webshop-minimal/webshop_minimal/data/
