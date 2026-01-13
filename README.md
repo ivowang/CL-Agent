@@ -6,16 +6,6 @@
 
 CL-Agent is a research framework for training LLM-based agents using reinforcement learning with a focus on **continual learning** across multiple interactive environments. Built on top of [RAGEN](https://github.com/mll-lab-nu/RAGEN), it provides a modular architecture for implementing and comparing various continual learning strategies.
 
-## Table of Contents
-
-- [Overview](#overview)
-- [Quick Start](#quick-start)
-- [Supported Environments](#supported-environments)
-- [Continual Learning Methods](#continual-learning-methods)
-- [Training Scripts](#training-scripts)
-- [Configuration](#configuration)
-- [Experiment Tracking](#experiment-tracking)
-
 ---
 
 ## Overview
@@ -182,7 +172,6 @@ Step 1: Bandit → Step 2: Sokoban → Step 3: Frozen Lake → Step 4: Bandit �
 | `run_continual_olora.sh` | O-LoRA | Sequential with orthogonal subspaces |
 | `run_er.sh` | Experience Replay | In-context learning with buffer |
 | `run_mix.sh` | Mix | Interleaved multi-task training |
-| `run.sh` | Standard RL | Single environment training |
 
 ### Common Environment Variables
 
@@ -273,17 +262,6 @@ es_manager:
     group_size: 16
 ```
 
-### Hydra Overrides
-
-Override any configuration via command line:
-
-```bash
-python train_continual.py --config-name continual_learning \
-  trainer.total_training_steps=500 \
-  continual_learning.steps_per_task=150 \
-  "system.CUDA_VISIBLE_DEVICES='0,1'"
-```
-
 ---
 
 ## Experiment Tracking
@@ -317,84 +295,3 @@ bash run_continual_olora.sh
 Access results at: `https://wandb.ai/{your-username}/CL-Agent_continual_learning`
 
 ---
-
-## Extending the Framework
-
-### Adding New CL Methods
-
-1. Create a new method file in `CL-Agent/cl_methods/`:
-
-```python
-# CL-Agent/cl_methods/my_method.py
-from CL-Agent.cl_methods.base import BaseCLMethod
-from CL-Agent.cl_methods.registry import register_cl_method
-
-@register_cl_method("my_method")
-class MyCLMethod(BaseCLMethod):
-    def __init__(self, config: Dict[str, Any]):
-        super().__init__(config)
-        # Initialize method-specific state
-    
-    def on_task_start(self, task_idx: int, task_name: str, checkpoint_path: Optional[str] = None):
-        # Called before each task begins
-        pass
-    
-    def on_task_end(self, task_idx: int, task_name: str, checkpoint_path: str):
-        # Called after each task completes
-        pass
-    
-    def get_cl_loss_config(self) -> Dict[str, Any]:
-        # Return configuration for CL-specific loss computation
-        return {"method_name": "my_method", ...}
-```
-
-2. Register in `CL-Agent/cl_methods/__init__.py`:
-
-```python
-from .my_method import MyCLMethod
-```
-
-3. Create corresponding configuration and training script.
-
-### Adding New Environments
-
-1. Create environment directory in `CL-Agent/env/`:
-
-```
-CL-Agent/env/my_env/
-├── __init__.py
-├── config.py
-└── env.py
-```
-
-2. Implement the environment interface:
-
-```python
-# CL-Agent/env/my_env/env.py
-from CL-Agent.env.base import Env
-
-class MyEnv(Env):
-    def __init__(self, config: MyEnvConfig):
-        super().__init__(config)
-    
-    def reset(self, seed: Optional[int] = None) -> Tuple[str, Dict]:
-        # Return initial observation
-        pass
-    
-    def step(self, action: str) -> Tuple[str, float, bool, Dict]:
-        # Return (observation, reward, done, info)
-        pass
-```
-
-3. Register in `config/envs.yaml`.
-
----
-
-## Acknowledgments
-
-- [RAGEN](https://github.com/mll-lab-nu/RAGEN) - The codebase we built our project on
-- [veRL](https://github.com/volcengine/verl) - The underlying RL training framework
-- [vLLM](https://github.com/vllm-project/vllm) - High-throughput LLM inference
-- [PEFT](https://github.com/huggingface/peft) - Parameter-efficient fine-tuning
-- [Hydra](https://hydra.cc/) - Configuration management
-- [WandB](https://wandb.ai/) - Experiment tracking
