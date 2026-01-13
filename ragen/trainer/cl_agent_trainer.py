@@ -177,10 +177,10 @@ class ContinualLearningAgentTrainer(RayAgentTrainer):
         # Temporarily replace with task-specific ES manager
         self.agent_proxy.val_es_manager = es_manager
         
-        # CRITICAL FIX: Create a new ContextManager for this task
-        # The old ctx_manager's prefix_lookup maps env_ids to the WRONG environment instructions
-        # (e.g., all env_ids map to Bandit's instruction even when validating Sokoban)
-        # We need a fresh ctx_manager that uses the correct environment instructions
+        # IMPORTANT: Create a new ContextManager for this task to ensure correct prefix_lookup
+        # Without this, the prefix_lookup from the current task's ctx_manager would be used,
+        # causing LLM to receive wrong environment instructions when validating previous tasks.
+        # This fix applies to both Mix training and CL (baseline/olora) training.
         self.agent_proxy.val_ctx_manager = ContextManager(
             es_manager.sys_config,  # Use the ES manager's full config which has correct env tags
             self.tokenizer,

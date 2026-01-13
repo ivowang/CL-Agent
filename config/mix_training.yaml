@@ -30,7 +30,7 @@ defaults:
 trainer:
   project_name: ragen_mix_training
   experiment_name: mix
-  total_training_steps: 300  # Total steps across all environments
+  total_training_steps: 600  # Total steps across all environments
   test_freq: 10  # Validate every 10 steps on all environments
   save_freq: 100  # Save checkpoint every 100 steps
   val_before_train: True
@@ -96,7 +96,7 @@ actor_rollout_ref:
   rollout:
     response_length: 500
     # Lower GPU memory utilization to be safe with multi-env switching
-    gpu_memory_utilization: 0.4
+    gpu_memory_utilization: 0.6
     val_kwargs:
       do_sample: True
       temperature: 0.5

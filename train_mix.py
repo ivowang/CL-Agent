@@ -272,6 +272,9 @@ def main(config: DictConfig):
     print("=" * 60)
     trainer.fit()
     
+    # Update mix_method's total_steps (training loop ran inside trainer.fit())
+    mix_method.total_steps = total_steps
+    
     # Mark task as ended
     checkpoint_dir = getattr(config.trainer, 'default_local_dir', 'checkpoints/mix')
     checkpoint_path = os.path.join(checkpoint_dir, f"global_step_{total_steps}")
@@ -279,7 +282,8 @@ def main(config: DictConfig):
     
     print("=" * 60)
     print("[Mix] Training completed!")
-    print(f"[Mix] Steps per environment: {mix_method.steps_per_env}")
+    print(f"[Mix] Total steps: {mix_method.total_steps}")
+    print(f"[Mix] Environments trained simultaneously: {mix_method.env_tags}")
     print("=" * 60)
     
     # Cleanup

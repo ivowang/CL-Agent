@@ -42,7 +42,7 @@ continual_learning:
   # Actual path: {checkpoint_base_dir}/olora/{timestamp}/
   checkpoint_base_dir: checkpoints
   
-  steps_per_task: 100
+  steps_per_task: 200
   
   # Resume from checkpoint (optional)
   # If not set, training starts from scratch

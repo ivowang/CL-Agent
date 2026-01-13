@@ -41,7 +41,7 @@ continual_learning:
   checkpoint_base_dir: checkpoints
   
   # Number of training steps per task
-  steps_per_task: 100
+  steps_per_task: 200
   
   # Resume from checkpoint (optional)
   # If not set, training starts from scratch

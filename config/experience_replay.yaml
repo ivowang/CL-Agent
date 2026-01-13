@@ -74,3 +74,5 @@ actor_rollout_ref:
     val_kwargs:
       do_sample: True
       temperature: 0.5
+      # max_model_len: 4096
+      # response_length: 256
