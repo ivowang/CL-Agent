@@ -8,28 +8,17 @@ CL-Agent is a research framework for training LLM-based agents using reinforceme
 
 ## Common Commands
 
-### Single Environment Training
+### 9-Task Benchmark (3 environments × 3 difficulties)
 ```bash
-python train.py --config-name _2_sokoban
-CUDA_VISIBLE_DEVICES=0,1,2,3 python train.py --config-name _1_bandit
-```
+# Task orderings (9-digit string):
+#   012345678 - Env-first, LMH: BL→BM→BH→SL→SM→SH→FL→FM→FH
+#   210543876 - Env-first, HML: BH→BM→BL→SH→SM→SL→FH→FM→FL
+#   036147258 - Difficulty-first, LMH: BL→SL→FL→BM→SM→FM→BH→SH→FH
+#   258147036 - Difficulty-first, HML: BH→SH→FH→BM→SM→FM→BL→SL→FL
 
-### Continual Learning Methods
-```bash
-# Baseline (Naive Sequential)
-bash run_continual.sh
-TASK_ORDER=210 bash run_continual.sh  # Custom task order
-
-# O-LoRA (Orthogonal Low-Rank Adaptation)
-bash run_continual_olora.sh
-LAMBDA_ORTHO=0.3 LAMBDA_L2=0.01 bash run_continual_olora.sh
-
-# Experience Replay (In-Context Learning)
-ENV_TAG=Bandit BUFFER_SIZE=20 bash run_er.sh
-
-# Mix Training (Interleaved Multi-Task)
-bash run_mix.sh
-TOTAL_STEPS=300 TEST_FREQ=10 bash run_mix.sh
+TASK_ORDER=012345678 bash run_continual_9tasks.sh
+TASK_ORDER=036147258 bash run_continual_9tasks_olora.sh
+TASK_ORDER=258147036 bash run_continual_9tasks_sdlora.sh
 ```
 
 ### Environment Variables
@@ -57,6 +46,7 @@ Worker Layer (DataParallelPPOActor, CriticWorker, EnvStateManager, AgentProxy)
 - `base.py`: Abstract `BaseCLMethod` interface with hooks: `on_task_start()`, `on_task_end()`, `get_cl_loss_config()`
 - `naive.py`: Baseline - shared LoRA across all tasks
 - `olora.py`: O-LoRA - learns each task in orthogonal subspaces
+- `sdlora.py`: SD-LoRA - separate LoRA per task with learnable scaling factors
 - `experience_replay.py`: Stores successful trajectories for in-context learning
 - `mix.py`: All environments mixed in each batch
 - `loss_functions.py`: CL-specific loss computation (orthogonality loss, etc.)
@@ -84,10 +74,11 @@ Worker Layer (DataParallelPPOActor, CriticWorker, EnvStateManager, AgentProxy)
 
 ### Configuration (Hydra-based)
 - `config/base.yaml`: Base settings
-- `config/continual_learning.yaml`: Sequential CL config
-- `config/continual_learning_olora.yaml`: O-LoRA config
+- `config/continual_learning_9tasks.yaml`: Sequential CL config
+- `config/continual_learning_9tasks_olora.yaml`: O-LoRA config
+- `config/continual_learning_9tasks_sdlora.yaml`: SD-LoRA config
 - `config/experience_replay.yaml`: ER config
-- `config/mix_training.yaml`: Mix training config
+- `config/mix_training_9tasks.yaml`: Mix training config
 - `config/envs.yaml`: Environment definitions
 
 ### Data Flow in Training
@@ -124,5 +115,6 @@ if self._cl_config.get('has_cl_loss'):
 
 Saved to `checkpoints/{method}/{timestamp}/global_step_{N}/`:
 - `actor/model.pt`, `critic/model.pt`
-- `cl_method_state.pt` (for O-LoRA)
+- `cl_method_state.pt` (for O-LoRA, SD-LoRA)
+- `scaling_factors.pt` (for SD-LoRA)
 - `metadata.json`
