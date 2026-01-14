@@ -256,3 +256,199 @@ custom_envs:
       show_conflicts: true
       show_valid_numbers: true
       max_steps: 81
+
+  # ============================================================================
+  # 9-Task Continual Learning Benchmark Environments
+  # ============================================================================
+  # Each environment type has three difficulty levels: Low, Medium, Hard
+  # Index mapping for task ordering:
+  #   0=BanditLow, 1=BanditMedium, 2=BanditHard
+  #   3=SokobanLow, 4=SokobanMedium, 5=SokobanHard
+  #   6=FrozenLakeLow, 7=FrozenLakeMedium, 8=FrozenLakeHard
+  # ============================================================================
+
+  # --- Bandit Environments (3 difficulty levels) ---
+  # Difficulty controlled by hi_arm_hiscore_prob: higher = easier to identify the better arm
+
+  BanditLow:
+    env_type: bandit
+    max_actions_per_traj: 1
+    env_instruction: ""
+    max_tokens: 100
+    parallel_friendly: false
+    max_workers: 32
+    env_config:
+      split: "train"
+      hi_arm_hiscore_prob: 0.5
+
+  BanditMedium:
+    env_type: bandit
+    max_actions_per_traj: 1
+    env_instruction: ""
+    max_tokens: 100
+    parallel_friendly: false
+    max_workers: 32
+    env_config:
+      split: "train"
+      hi_arm_hiscore_prob: 0.25
+
+  BanditHard:
+    env_type: bandit
+    max_actions_per_traj: 1
+    env_instruction: ""
+    max_tokens: 100
+    parallel_friendly: false
+    max_workers: 32
+    env_config:
+      split: "train"
+      hi_arm_hiscore_prob: 0.1
+
+  # Validation versions for Bandit
+  BanditLowVal:
+    env_type: bandit
+    max_actions_per_traj: 1
+    env_instruction: ""
+    max_tokens: 100
+    parallel_friendly: false
+    max_workers: 32
+    env_config:
+      split: "test"
+      hi_arm_hiscore_prob: 0.5
+
+  BanditMediumVal:
+    env_type: bandit
+    max_actions_per_traj: 1
+    env_instruction: ""
+    max_tokens: 100
+    parallel_friendly: false
+    max_workers: 32
+    env_config:
+      split: "test"
+      hi_arm_hiscore_prob: 0.25
+
+  BanditHardVal:
+    env_type: bandit
+    max_actions_per_traj: 1
+    env_instruction: ""
+    max_tokens: 100
+    parallel_friendly: false
+    max_workers: 32
+    env_config:
+      split: "test"
+      hi_arm_hiscore_prob: 0.1
+
+  # --- Sokoban Environments (3 difficulty levels) ---
+  # Difficulty controlled by grid size and number of boxes
+  # Low: 5x5, 1 box | Medium: 7x7, 2 boxes | Hard: 9x9, 3 boxes
+
+  SokobanLow:
+    env_type: sokoban
+    max_actions_per_traj: 10
+    env_instruction: |
+      You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets.
+      You are provided with a symbol grid and the zero-indexed coordinates of the player, each box, and each target.
+      Coordinates range from the top-left corner (0, 0) to the bottom-right corner (4, 4).
+      When you are exactly next to a box, you can push it by moving in the same direction.
+      You cannot push a box through a wall, and you cannot pull a box.
+      The answer should be a sequence of actions, like <answer>Right || Right || Up</answer>.
+    max_tokens: 120
+    parallel_friendly: false
+    max_workers: 32
+    env_config:
+      dim_x: 5
+      dim_y: 5
+      num_boxes: 1
+      max_steps: 100
+      observation_format: "grid_coord"
+
+  SokobanMedium:
+    env_type: sokoban
+    max_actions_per_traj: 10
+    env_instruction: |
+      You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets.
+      You are provided with a symbol grid and the zero-indexed coordinates of the player, each box, and each target.
+      Coordinates range from the top-left corner (0, 0) to the bottom-right corner (6, 6).
+      When you are exactly next to a box, you can push it by moving in the same direction.
+      You cannot push a box through a wall, and you cannot pull a box.
+      The answer should be a sequence of actions, like <answer>Right || Right || Up</answer>.
+    max_tokens: 150
+    parallel_friendly: false
+    max_workers: 32
+    env_config:
+      dim_x: 7
+      dim_y: 7
+      num_boxes: 2
+      max_steps: 100
+      observation_format: "grid_coord"
+
+  SokobanHard:
+    env_type: sokoban
+    max_actions_per_traj: 10
+    env_instruction: |
+      You are solving the Sokoban puzzle. You are the player and you need to push all boxes to targets.
+      You are provided with a symbol grid and the zero-indexed coordinates of the player, each box, and each target.
+      Coordinates range from the top-left corner (0, 0) to the bottom-right corner (8, 8).
+      When you are exactly next to a box, you can push it by moving in the same direction.
+      You cannot push a box through a wall, and you cannot pull a box.
+      The answer should be a sequence of actions, like <answer>Right || Right || Up</answer>.
+    max_tokens: 180
+    parallel_friendly: false
+    max_workers: 32
+    env_config:
+      dim_x: 9
+      dim_y: 9
+      num_boxes: 3
+      max_steps: 100
+      observation_format: "grid_coord"
+
+  # --- Frozen Lake Environments (3 difficulty levels) ---
+  # Difficulty controlled by grid size and slippery ice
+  # Low: 4x4, non-slippery | Medium: 6x6, slippery | Hard: 8x8, slippery
+
+  FrozenLakeLow:
+    env_type: frozen_lake
+    max_actions_per_traj: 10
+    env_instruction: |
+      You are solving the FrozenLake puzzle. The observation includes both a symbol grid and zero-indexed coordinates for the start, goal, player, and any holes.
+      Coordinates range from the top-left corner (0, 0) to the bottom-right corner (3, 3).
+      The ice is NOT slippery in this version, so the agent moves exactly where you command.
+      Respond with a sequence of actions such as <answer>Left || Up || Up</answer>.
+    max_tokens: 120
+    parallel_friendly: false
+    max_workers: 32
+    env_config:
+      observation_format: "grid_coord"
+      size: 4
+      is_slippery: false
+
+  FrozenLakeMedium:
+    env_type: frozen_lake
+    max_actions_per_traj: 10
+    env_instruction: |
+      You are solving the FrozenLake puzzle. The observation includes both a symbol grid and zero-indexed coordinates for the start, goal, player, and any holes.
+      Coordinates range from the top-left corner (0, 0) to the bottom-right corner (5, 5).
+      Beware that the ice is slippery, so the agent might slide and end up in an unintended tile.
+      Respond with a sequence of actions such as <answer>Left || Up || Up</answer>.
+    max_tokens: 140
+    parallel_friendly: false
+    max_workers: 32
+    env_config:
+      observation_format: "grid_coord"
+      size: 6
+      is_slippery: true
+
+  FrozenLakeHard:
+    env_type: frozen_lake
+    max_actions_per_traj: 10
+    env_instruction: |
+      You are solving the FrozenLake puzzle. The observation includes both a symbol grid and zero-indexed coordinates for the start, goal, player, and any holes.
+      Coordinates range from the top-left corner (0, 0) to the bottom-right corner (7, 7).
+      Beware that the ice is slippery, so the agent might slide and end up in an unintended tile.
+      Respond with a sequence of actions such as <answer>Left || Up || Up</answer>.
+    max_tokens: 160
+    parallel_friendly: false
+    max_workers: 32
+    env_config:
+      observation_format: "grid_coord"
+      size: 8
+      is_slippery: true

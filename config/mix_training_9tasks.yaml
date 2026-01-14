@@ -1,0 +1,146 @@
+# 9-Task Mix Training Configuration
+#
+# This config enables multi-task mixed training where the agent trains on ALL 9
+# environments SIMULTANEOUSLY in each batch. Each parallel sampling step includes
+# samples from all 9 environments mixed together.
+#
+# Environments:
+#   BanditLow, BanditMedium, BanditHard
+#   SokobanLow, SokobanMedium, SokobanHard
+#   FrozenLakeLow, FrozenLakeMedium, FrozenLakeHard
+#
+# Key features:
+# - All 9 environments are mixed in each training batch
+# - Single shared LoRA module for all environments
+# - No sequential task ordering
+# - Each batch contains samples from all difficulty levels
+#
+# Checkpoint structure:
+#   checkpoints/mix_9tasks/{timestamp}/global_step_{N}/
+#
+# Usage:
+#   python train_mix.py --config-name mix_training_9tasks
+#   or
+#   bash run_mix_9tasks.sh
+#
+# With custom parameters:
+#   TOTAL_STEPS=900 TEST_FREQ=10 bash run_mix_9tasks.sh
+
+defaults:
+  - base
+  - _self_
+
+# Override base settings for mix training
+trainer:
+  project_name: ragen_mix_training_9tasks
+  experiment_name: mix_9tasks
+  total_training_steps: 1800  # Equivalent to 9 tasks × 200 steps
+  test_freq: 100  # Validate every 100 steps on all environments
+  save_freq: 200  # Save checkpoint every 200 steps
+  val_before_train: True
+  generations_to_log_to_wandb:
+    val: 20
+  logger: ['console', 'wandb']
+  max_actor_ckpt_to_keep: 5
+  max_critic_ckpt_to_keep: 5
+  resume_mode: disable
+  default_local_dir: checkpoints/mix_9tasks
+
+# Mix training specific settings
+mix_training:
+  # Method name (for logging)
+  method_name: mix_9tasks
+
+  # List of 9 environments to mix in each training batch
+  # All environments are sampled simultaneously in each step
+  # n_groups determines how many groups of each environment type per batch
+  environments:
+    # Bandit environments (3 difficulty levels)
+    - name: bandit_low
+      train_tags: ["BanditLow"]
+      train_n_groups: [2]         # 2 groups × 16 = 32 samples per batch
+      val_tags: ["BanditLowVal"]
+      val_n_groups: [32]
+
+    - name: bandit_medium
+      train_tags: ["BanditMedium"]
+      train_n_groups: [2]
+      val_tags: ["BanditMediumVal"]
+      val_n_groups: [32]
+
+    - name: bandit_hard
+      train_tags: ["BanditHard"]
+      train_n_groups: [2]
+      val_tags: ["BanditHardVal"]
+      val_n_groups: [32]
+
+    # Sokoban environments (3 difficulty levels)
+    - name: sokoban_low
+      train_tags: ["SokobanLow"]
+      train_n_groups: [2]
+      val_tags: ["SokobanLow"]
+      val_n_groups: [32]
+
+    - name: sokoban_medium
+      train_tags: ["SokobanMedium"]
+      train_n_groups: [2]
+      val_tags: ["SokobanMedium"]
+      val_n_groups: [32]
+
+    - name: sokoban_hard
+      train_tags: ["SokobanHard"]
+      train_n_groups: [2]
+      val_tags: ["SokobanHard"]
+      val_n_groups: [32]
+
+    # Frozen Lake environments (3 difficulty levels)
+    - name: frozen_lake_low
+      train_tags: ["FrozenLakeLow"]
+      train_n_groups: [2]
+      val_tags: ["FrozenLakeLow"]
+      val_n_groups: [32]
+
+    - name: frozen_lake_medium
+      train_tags: ["FrozenLakeMedium"]
+      train_n_groups: [2]
+      val_tags: ["FrozenLakeMedium"]
+      val_n_groups: [32]
+
+    - name: frozen_lake_hard
+      train_tags: ["FrozenLakeHard"]
+      train_n_groups: [2]
+      val_tags: ["FrozenLakeHard"]
+      val_n_groups: [32]
+
+  # Total per batch: 9 envs × 2 groups × 16 = 288 samples
+
+# Agent proxy settings
+agent_proxy:
+  max_turn: 5
+  max_actions_per_turn: 2
+
+# ES Manager settings (initial placeholder, will be overridden to include all envs)
+# The actual mixed config is built dynamically in mix_trainer.py
+es_manager:
+  train:
+    env_groups: 18              # Total: 9 envs × 2 = 18 groups for mixed training
+    group_size: 16
+    env_configs:
+      tags: ["BanditLow", "BanditMedium", "BanditHard", "SokobanLow", "SokobanMedium", "SokobanHard", "FrozenLakeLow", "FrozenLakeMedium", "FrozenLakeHard"]
+      n_groups: [2, 2, 2, 2, 2, 2, 2, 2, 2]
+  val:
+    env_groups: 32
+    group_size: 16
+    env_configs:
+      tags: ["BanditLowVal"]    # Validation done separately per env
+      n_groups: [32]
+
+# Rollout settings
+actor_rollout_ref:
+  rollout:
+    response_length: 500
+    # Lower GPU memory utilization to be safe with multi-env switching
+    gpu_memory_utilization: 0.5
+    val_kwargs:
+      do_sample: True
+      temperature: 0.5

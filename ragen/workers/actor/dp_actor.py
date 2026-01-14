@@ -72,57 +72,91 @@ class DataParallelPPOActor(BasePPOActor):
     def set_cl_config(self, cl_config: Dict[str, Any]) -> None:
         """
         Set continual learning configuration.
-        
+
         Args:
             cl_config: CL configuration dict containing:
-                - method: CL method name ('naive', 'olora', etc.)
+                - method: CL method name ('naive', 'olora', 'sdlora', etc.)
                 - lambda_ortho: Weight for orthogonal loss (O-LoRA)
                 - lambda_l2: Weight for L2 regularization (O-LoRA)
                 - current_task_idx: Current task index
                 - frozen_lora_params: Frozen LoRA params from previous tasks (optional)
+                - scaling_factors: Scaling factors for each task (SD-LoRA)
+                - all_frozen_lora_params: All frozen LoRA params by task (SD-LoRA)
         """
         self._cl_config = cl_config
-        self._cl_method_name = cl_config.get('method', 'naive')
+        self._cl_method_name = cl_config.get('method_name', cl_config.get('method', 'naive'))
         self._frozen_lora_params = cl_config.get('frozen_lora_params', None)
-        
+
         if torch.distributed.is_initialized():
             rank = torch.distributed.get_rank()
         else:
             rank = 0
-            
+
         if rank == 0:
             print(f"[CL Actor] Set config: method={self._cl_method_name}, "
                   f"task_idx={cl_config.get('current_task_idx', 0)}, "
                   f"has_frozen_params={self._frozen_lora_params is not None}")
-    
+            # Log SD-LoRA specific info
+            if self._cl_method_name == 'sdlora':
+                scaling_factors = cl_config.get('scaling_factors', {})
+                all_frozen = cl_config.get('all_frozen_lora_params', {})
+                print(f"[CL Actor] SD-LoRA: scaling_factors={scaling_factors}, "
+                      f"num_frozen_tasks={len(all_frozen)}")
+
     def _compute_cl_loss(self) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         Compute continual learning loss based on the configured method.
-        
+
         Returns:
             Tuple of (cl_loss_tensor, metrics_dict)
         """
         if self._cl_method_name == 'naive' or self._cl_method_name == 'baseline':
             # No CL loss for naive/baseline method
             return torch.tensor(0.0, device=torch.cuda.current_device(), requires_grad=False), {'cl/total_loss': 0.0}
-        
-        # Check if we should compute CL loss (only after first task for O-LoRA)
+
         current_task_idx = self._cl_config.get('current_task_idx', 0)
+
+        # SD-LoRA handling
+        if self._cl_method_name == 'sdlora':
+            # SD-LoRA doesn't have explicit CL loss, but we log metrics
+            cl_loss_config = {
+                'current_task_idx': current_task_idx,
+                'scaling_factors': self._cl_config.get('scaling_factors', {}),
+            }
+            cl_loss_fn = get_cl_loss_fn('sdlora')
+            try:
+                cl_loss, metrics = cl_loss_fn(
+                    self.actor_module,
+                    cl_loss_config,
+                    self._frozen_lora_params,
+                    device=torch.cuda.current_device(),
+                )
+                return cl_loss, metrics
+            except Exception as e:
+                if torch.distributed.is_initialized():
+                    rank = torch.distributed.get_rank()
+                else:
+                    rank = 0
+                if rank == 0:
+                    print(f"[CL Warning] Error computing SD-LoRA metrics: {e}")
+                return torch.tensor(0.0, device=torch.cuda.current_device(), requires_grad=False), {'cl/total_loss': 0.0}
+
+        # O-LoRA and other methods that require frozen params
         if current_task_idx == 0:
             # First task - no orthogonal constraint
             return torch.tensor(0.0, device=torch.cuda.current_device(), requires_grad=False), {'cl/total_loss': 0.0}
-        
+
         # Check if we have frozen params
         if self._frozen_lora_params is None or len(self._frozen_lora_params) == 0:
             return torch.tensor(0.0, device=torch.cuda.current_device(), requires_grad=False), {'cl/total_loss': 0.0}
-        
+
         # Build CL config for the loss function
         cl_loss_config = {
             'lambda_ortho': self._cl_config.get('lambda_ortho', 0.5),
             'lambda_l2': self._cl_config.get('lambda_l2', 0.0),
             'current_task_idx': current_task_idx,
         }
-        
+
         # Get the appropriate loss function
         cl_loss_fn = get_cl_loss_fn(self._cl_method_name)
         

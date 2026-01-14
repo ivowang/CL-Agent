@@ -249,19 +249,31 @@ class ContinualLearningAgentTrainer(RayAgentTrainer):
         
         return metric_dict
     
-    def fit(self):
+    def fit(self, logger=None, task_name=None):
         """
         The training loop with continual learning support.
         Extends the original fit() with multi-task validation.
-        """
-        from verl.utils.tracking import Tracking
 
-        logger = Tracking(
-            project_name=self.config.trainer.project_name,
-            experiment_name=self.config.trainer.experiment_name,
-            default_backend=self.config.trainer.logger,
-            config=OmegaConf.to_container(self.config, resolve=True),
-        )
+        Args:
+            logger: Optional external logger (Tracking instance). If provided,
+                    uses this logger instead of creating a new one. This allows
+                    multiple tasks to share the same WandB run.
+            task_name: Name of the current task (used for logging task transitions).
+        """
+        # Use external logger if provided, otherwise create a new one
+        if logger is None:
+            from verl.utils.tracking import Tracking
+            logger = Tracking(
+                project_name=self.config.trainer.project_name,
+                experiment_name=self.config.trainer.experiment_name,
+                default_backend=self.config.trainer.logger,
+                config=OmegaConf.to_container(self.config, resolve=True),
+            )
+            self._owns_logger = True
+        else:
+            self._owns_logger = False
+
+        self.task_name = task_name or f"task_{self.current_task_idx}"
 
         self.global_steps = 0
         self._load_checkpoint()
@@ -280,8 +292,8 @@ class ContinualLearningAgentTrainer(RayAgentTrainer):
             if self.config.trainer.get("val_only", False):
                 return
 
-        progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, 
-                          desc=f"CL Training Task {self.current_task_idx}")
+        progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps,
+                          desc=f"CL Training Task {self.current_task_idx} ({self.task_name})")
 
         self.global_steps += 1
         last_val_metrics = None
@@ -441,13 +453,14 @@ class ContinualLearningAgentTrainer(RayAgentTrainer):
             # Add CL specific metrics
             metrics.update({
                 "cl/current_task_idx": self.current_task_idx,
+                "cl/current_task_name": self.task_name,
                 "cl/task_local_step": self.global_steps - start_step,
             })
 
             logger.log(data=metrics, step=self.global_steps)
 
             if is_last_step:
-                pprint(f"[CL Task {self.current_task_idx}] Final validation metrics: {last_val_metrics}")
+                pprint(f"[CL Task {self.current_task_idx} ({self.task_name})] Final validation metrics: {last_val_metrics}")
                 progress_bar.close()
                 return
 

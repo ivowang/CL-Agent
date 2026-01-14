@@ -223,25 +223,26 @@ def init_cl_method(cl_method_config, task_idx, config, cl_method_state=None):
     return method
 
 
-def run_continual_training(config, start_global_step, checkpoint_dir, timestamp, 
+def run_continual_training(config, start_global_step, checkpoint_dir, timestamp,
                            all_env_configs, cl_method_config, tasks, cl_method_state=None,
                            resume_checkpoint=None):
     """
     Run continual training from a given starting step.
-    
+
     This function handles the entire training loop across all tasks,
     automatically switching tasks when steps_per_task is reached.
-    
+
     Args:
         tasks: List of task configs (already reordered if task_order was specified)
     """
     from verl.utils.fs import copy_to_local
     from verl.utils import hf_tokenizer, hf_processor
+    from verl.utils.tracking import Tracking
     from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
     from ragen.workers.fsdp_workers import ActorRolloutRefWorker, CriticWorker
     from verl.single_controller.ray import RayWorkerGroup
     from ragen.trainer.cl_agent_trainer import ContinualLearningAgentTrainer
-    
+
     cl_config = config.continual_learning
     # Use the tasks passed in (already reordered), not from config
     steps_per_task = cl_config.steps_per_task
@@ -266,10 +267,22 @@ def run_continual_training(config, start_global_step, checkpoint_dir, timestamp,
     os.environ["CUDA_VISIBLE_DEVICES"] = str(config.system.CUDA_VISIBLE_DEVICES)
     print(f"CUDA_VISIBLE_DEVICES: {os.environ['CUDA_VISIBLE_DEVICES']}")
     os.environ["ENSURE_CUDA_VISIBLE_DEVICES"] = os.environ.get('CUDA_VISIBLE_DEVICES', '')
-    
+
+    # Create a single WandB logger for the entire task sequence
+    # This ensures all tasks are logged to the same WandB run
+    task_order_str = getattr(config.continual_learning, 'task_order', None) or ''.join(str(i) for i in range(total_tasks))
+    experiment_name = f"{timestamp}_{method_name}_order{task_order_str}"
+    logger = Tracking(
+        project_name=config.trainer.project_name,
+        experiment_name=experiment_name,
+        default_backend=config.trainer.logger,
+        config=OmegaConf.to_container(config, resolve=True),
+    )
+    print(f"[CL] Created single WandB run: {experiment_name}")
+
     current_global_step = start_global_step
     current_checkpoint = resume_checkpoint
-    
+
     for task_idx in range(start_task_idx, total_tasks):
         task = tasks[task_idx]
         task_name = task.name
@@ -308,9 +321,8 @@ def run_continual_training(config, start_global_step, checkpoint_dir, timestamp,
             # from checkpoint, global_steps is restored from the checkpoint,
             # and the trainer checks: is_last_step = global_steps >= total_training_steps
             task_config.trainer.total_training_steps = target_global_step
-            # WandB run name: timestamp_method_taskname
-            task_config.trainer.experiment_name = f"{timestamp}_{method_name}_{task_name}"
-            
+            # Note: experiment_name is now set at the task sequence level, not per-task
+
             # Update environment configs
             task_config.es_manager.train.env_configs.tags = list(task.train_tags)
             task_config.es_manager.train.env_configs.n_groups = list(task.train_n_groups)
@@ -406,9 +418,9 @@ def run_continual_training(config, start_global_step, checkpoint_dir, timestamp,
         trainer.init_agent_proxy()
         trainer.init_cl_validation()
         trainer.set_cl_config_on_workers()
-        
-        # Run training
-        trainer.fit()
+
+        # Run training with shared logger (single WandB run for entire task sequence)
+        trainer.fit(logger=logger, task_name=task_name)
         
         # Update global step
         current_global_step += steps_remaining

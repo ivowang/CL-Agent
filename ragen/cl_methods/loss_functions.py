@@ -314,29 +314,83 @@ def reinitialize_lora_params(model: nn.Module) -> None:
     print(f"[O-LoRA] Reinitialized LoRA parameters for new task")
 
 
+def compute_sdlora_loss(
+    model: nn.Module,
+    cl_config: Dict[str, Any],
+    frozen_lora_params: Optional[Dict[str, Dict[str, torch.Tensor]]] = None,
+    device: Optional[torch.device] = None,
+) -> Tuple[torch.Tensor, Dict[str, float]]:
+    """
+    Compute SD-LoRA loss (if any).
+
+    SD-LoRA primarily works by modifying the forward pass to combine
+    multiple LoRA adapters with learnable scaling factors. It doesn't
+    have an explicit CL loss like O-LoRA's orthogonal constraint.
+
+    However, we can optionally add regularization terms:
+    1. Scaling factor regularization: Encourage scaling factors to stay bounded
+    2. Diversity regularization: Encourage different tasks to have different contributions
+
+    Args:
+        model: The model containing LoRA layers
+        cl_config: CL configuration dict containing:
+            - scaling_factors: Dict of task_idx -> scaling_factor
+            - current_task_idx: Current task index
+            - lambda_scaling_reg: Weight for scaling factor regularization (optional)
+        frozen_lora_params: Dict of frozen LoRA parameters (not used for loss, but for forward)
+        device: Device to compute on
+
+    Returns:
+        Tuple of (total_cl_loss, metrics_dict)
+    """
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    current_task_idx = cl_config.get('current_task_idx', 0)
+
+    # SD-LoRA doesn't have explicit CL loss by default
+    # The continual learning is handled by the forward pass modification
+    # Return zero loss with metrics for logging
+
+    metrics = {
+        'cl/sdlora_loss': 0.0,
+        'cl/total_loss': 0.0,
+        'cl/current_task': current_task_idx,
+        'cl/num_scaling_factors': len(cl_config.get('scaling_factors', {})),
+    }
+
+    # Log scaling factors for monitoring
+    scaling_factors = cl_config.get('scaling_factors', {})
+    for task_idx, sf in scaling_factors.items():
+        metrics[f'cl/scaling_factor_task{task_idx}'] = sf if isinstance(sf, float) else sf.item() if hasattr(sf, 'item') else float(sf)
+
+    return torch.tensor(0.0, device=device, requires_grad=False), metrics
+
+
 def get_cl_loss_fn(method_name: str):
     """
     Get the CL loss function for a specific method.
-    
+
     Args:
-        method_name: Name of the CL method ('baseline', 'naive', 'olora', etc.)
-        
+        method_name: Name of the CL method ('baseline', 'naive', 'olora', 'sdlora', etc.)
+
     Returns:
         The loss function for the method
     """
     # No-op loss function for baseline/naive
     def no_cl_loss(model, config, frozen, device=None):
         return torch.tensor(0.0), {'cl/total_loss': 0.0}
-    
+
     loss_functions = {
         'baseline': no_cl_loss,
         'naive': no_cl_loss,
         'olora': compute_olora_loss,
+        'sdlora': compute_sdlora_loss,
     }
-    
+
     if method_name not in loss_functions:
         print(f"[Warning] Unknown CL method: {method_name}, using baseline (no CL loss)")
         return loss_functions['baseline']
-    
+
     return loss_functions[method_name]
 

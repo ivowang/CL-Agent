@@ -1,0 +1,168 @@
+# 9-Task Continual Learning Configuration (Baseline/Naive Method)
+#
+# This config enables sequential training on 9 tasks (3 environments × 3 difficulty levels)
+# using the same LoRA module.
+#
+# Task Index Mapping:
+#   0=BanditLow, 1=BanditMedium, 2=BanditHard
+#   3=SokobanLow, 4=SokobanMedium, 5=SokobanHard
+#   6=FrozenLakeLow, 7=FrozenLakeMedium, 8=FrozenLakeHard
+#
+# Predefined Task Orderings:
+#   Order 1: "012345678" - Env-first, LMH: BL→BM→BH→SL→SM→SH→FL→FM→FH
+#   Order 2: "210543876" - Env-first, HML: BH→BM→BL→SH→SM→SL→FH→FM→FL
+#   Order 3: "036147258" - Difficulty-first, LMH: BL→SL→FL→BM→SM→FM→BH→SH→FH
+#   Order 4: "258147036" - Difficulty-first, HML: BH→SH→FH→BM→SM→FM→BL→SL→FL
+#
+# Checkpoint structure:
+#   checkpoints/baseline_9tasks/{timestamp}/global_step_{N}/
+#
+# Usage:
+#   python train_continual.py --config-name continual_learning_9tasks
+#   or
+#   bash run_continual_9tasks.sh
+#
+# With custom task order:
+#   TASK_ORDER=036147258 bash run_continual_9tasks.sh
+
+defaults:
+  - base
+  - _self_
+
+# Override base settings for continual learning
+trainer:
+  project_name: ragen_continual_learning_9tasks
+  experiment_name: cl_baseline_9tasks
+  total_training_steps: 200  # Will be overridden per task
+  test_freq: 100  # Validate every 100 steps on all seen tasks
+  save_freq: 200  # Save checkpoint at end of each task
+  val_before_train: True
+  generations_to_log_to_wandb:
+    val: 20
+  logger: ['console', 'wandb']
+  max_actor_ckpt_to_keep: 9
+  max_critic_ckpt_to_keep: 9
+  resume_mode: disable  # Will be set dynamically
+
+# Continual Learning specific settings
+continual_learning:
+  # Base experiment name
+  experiment_name: cl_baseline_9tasks
+
+  # Base directory for checkpoints
+  # Actual path: {checkpoint_base_dir}/{method_name}/{timestamp}/
+  checkpoint_base_dir: checkpoints
+
+  # Number of training steps per task
+  steps_per_task: 200
+
+  # Resume from checkpoint (optional)
+  resume_checkpoint: null
+
+  # Task order (optional)
+  # Use a 9-digit string of indices to specify the training order of tasks
+  # Default order: "012345678" (Env-first, Low→Medium→Hard)
+  # Predefined orderings:
+  #   "012345678" - Env-first, LMH
+  #   "210543876" - Env-first, HML
+  #   "036147258" - Difficulty-first, LMH
+  #   "258147036" - Difficulty-first, HML
+  task_order: null
+
+  # CL Method configuration (baseline = naive shared LoRA)
+  method:
+    name: baseline
+
+  # 9 Tasks: 3 environments × 3 difficulty levels
+  # Index order: Bandit(L,M,H), Sokoban(L,M,H), FrozenLake(L,M,H)
+  tasks:
+    # Task 0: Bandit Low
+    - name: bandit_low
+      train_tags: ["BanditLow"]
+      train_n_groups: [8]
+      val_tags: ["BanditLowVal"]
+      val_n_groups: [32]
+
+    # Task 1: Bandit Medium
+    - name: bandit_medium
+      train_tags: ["BanditMedium"]
+      train_n_groups: [8]
+      val_tags: ["BanditMediumVal"]
+      val_n_groups: [32]
+
+    # Task 2: Bandit Hard
+    - name: bandit_hard
+      train_tags: ["BanditHard"]
+      train_n_groups: [8]
+      val_tags: ["BanditHardVal"]
+      val_n_groups: [32]
+
+    # Task 3: Sokoban Low
+    - name: sokoban_low
+      train_tags: ["SokobanLow"]
+      train_n_groups: [8]
+      val_tags: ["SokobanLow"]
+      val_n_groups: [32]
+
+    # Task 4: Sokoban Medium
+    - name: sokoban_medium
+      train_tags: ["SokobanMedium"]
+      train_n_groups: [8]
+      val_tags: ["SokobanMedium"]
+      val_n_groups: [32]
+
+    # Task 5: Sokoban Hard
+    - name: sokoban_hard
+      train_tags: ["SokobanHard"]
+      train_n_groups: [8]
+      val_tags: ["SokobanHard"]
+      val_n_groups: [32]
+
+    # Task 6: Frozen Lake Low
+    - name: frozen_lake_low
+      train_tags: ["FrozenLakeLow"]
+      train_n_groups: [8]
+      val_tags: ["FrozenLakeLow"]
+      val_n_groups: [32]
+
+    # Task 7: Frozen Lake Medium
+    - name: frozen_lake_medium
+      train_tags: ["FrozenLakeMedium"]
+      train_n_groups: [8]
+      val_tags: ["FrozenLakeMedium"]
+      val_n_groups: [32]
+
+    # Task 8: Frozen Lake Hard
+    - name: frozen_lake_hard
+      train_tags: ["FrozenLakeHard"]
+      train_n_groups: [8]
+      val_tags: ["FrozenLakeHard"]
+      val_n_groups: [32]
+
+# Agent proxy settings
+agent_proxy:
+  max_turn: 5
+  max_actions_per_turn: 2
+
+# ES Manager settings (will be overridden per task dynamically)
+es_manager:
+  train:
+    env_groups: 8
+    group_size: 16
+    env_configs:
+      tags: ["BanditLow"]  # Placeholder, will be overridden
+      n_groups: [8]
+  val:
+    env_groups: 32
+    group_size: 16
+    env_configs:
+      tags: ["BanditLowVal"]  # Placeholder, will be overridden
+      n_groups: [32]
+
+# Rollout settings
+actor_rollout_ref:
+  rollout:
+    response_length: 500
+    val_kwargs:
+      do_sample: True
+      temperature: 0.5
