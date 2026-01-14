@@ -6,6 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 CL-Agent is a research framework for training LLM-based agents using reinforcement learning with a focus on **continual learning** across multiple interactive environments. Built on top of RAGEN/VERL, it provides modular architecture for implementing and comparing various continual learning strategies.
 
+## Python Environment
+
+This project uses micromamba to manage python environments. There has been a micromamba environment named "ragen" provided for this project in the server, use the following commmand to activate it:
+```bash
+micromamba activate ragen
+```
+
 ## Common Commands
 
 ### 9-Task Benchmark (3 environments × 3 difficulties)
