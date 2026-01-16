@@ -95,19 +95,41 @@ class ContinualLearningAgentTrainer(RayAgentTrainer):
         Set CL configuration on all actor workers.
         This is called after workers are initialized and before training starts.
         """
-        method_name = self.cl_method_config.get('name', 'naive')
+        # Get method name from cl_method_state (which comes from cl_method.get_cl_loss_config())
+        # Fall back to cl_method_config if not available
+        method_name = self.cl_method_state.get('method_name',
+                                                self.cl_method_config.get('name', 'naive'))
         print(f"[CL] Setting CL config on workers: method={method_name}, task_idx={self.current_task_idx}")
-        
-        # Build CL config for workers
+
+        # Build CL config for workers - pass through all fields from cl_method_state
+        # This ensures O-LoRA and SD-LoRA get all the parameters they need
         cl_config = {
             'method': method_name,
+            'method_name': method_name,  # For compatibility
             'current_task_idx': self.current_task_idx,
-            'lambda_ortho': self.cl_method_config.get('lambda_ortho', 0.5),
-            'lambda_l2': self.cl_method_config.get('lambda_l2', 0.0),
-            # Load frozen params from state if available
+            # O-LoRA specific
+            'lambda_ortho': self.cl_method_state.get('lambda_ortho',
+                                                      self.cl_method_config.get('lambda_ortho', 0.5)),
+            'lambda_l2': self.cl_method_state.get('lambda_l2',
+                                                   self.cl_method_config.get('lambda_l2', 0.0)),
+            'has_cl_loss': self.cl_method_state.get('has_cl_loss', False),
+            'reinit_lora_per_task': self.cl_method_state.get('reinit_lora_per_task', True),
+            # Frozen LoRA params (for backward compatibility)
             'frozen_lora_params': self.cl_method_state.get('frozen_lora_params', None),
+            # All frozen LoRA params from all previous tasks (for O-LoRA and SD-LoRA)
+            'all_frozen_lora_params': self.cl_method_state.get('all_frozen_lora_params', {}),
+            # SD-LoRA specific
+            'scaling_factors': self.cl_method_state.get('scaling_factors', {}),
+            'scaling_factor_init': self.cl_method_state.get('scaling_factor_init', 0.8),
+            'normalize_lora': self.cl_method_state.get('normalize_lora', True),
+            'has_forward_modification': self.cl_method_state.get('has_forward_modification', False),
+            # Multi-LoRA manager state
+            'multi_lora_manager_state': self.cl_method_state.get('multi_lora_manager_state', None),
+            # Task checkpoints
+            'task_checkpoints': self.cl_method_state.get('task_checkpoints', {}),
+            'accumulated_rank': self.cl_method_state.get('accumulated_rank', 0),
         }
-        
+
         # Set config on all actor rollout workers
         if hasattr(self, 'actor_rollout_wg') and self.actor_rollout_wg is not None:
             try:
@@ -115,7 +137,7 @@ class ContinualLearningAgentTrainer(RayAgentTrainer):
                 # Note: RayWorkerGroup's execute_all_sync doesn't require underscore prefix
                 workers = self.actor_rollout_wg._workers if hasattr(self.actor_rollout_wg, '_workers') else []
                 num_workers = len(workers) if workers else 0
-                
+
                 # Execute on all workers using ray
                 import ray
                 results = []
@@ -127,7 +149,7 @@ class ContinualLearningAgentTrainer(RayAgentTrainer):
                     except AttributeError:
                         # Worker doesn't have set_cl_config method, skip
                         pass
-                
+
                 print(f"[CL] Successfully set CL config on {len(results)}/{num_workers} workers")
             except Exception as e:
                 print(f"[CL] Warning: Could not set CL config on workers: {e}")
@@ -277,7 +299,14 @@ class ContinualLearningAgentTrainer(RayAgentTrainer):
 
         self.global_steps = 0
         self._load_checkpoint()
-        
+
+        # IMPORTANT: Refresh CL config on workers AFTER checkpoint is loaded
+        # This ensures that the frozen LoRA params are correctly applied to the model
+        # that was just loaded from checkpoint. Without this, the first validation
+        # after task switch would use incorrect model state.
+        print(f"[CL] Refreshing CL config on workers after checkpoint load...")
+        self.set_cl_config_on_workers()
+
         # Track the starting step for this task
         start_step = self.global_steps
 

@@ -34,7 +34,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         all)
-            GPUS=(0 1 2 3)
+            GPUS=(0 1 2 3 4 5 6 7)
             shift
             ;;
         *)
@@ -51,7 +51,7 @@ if [ ${#GPUS[@]} -eq 0 ]; then
     echo ""
     echo "Options:"
     echo "  --kill-session, -k    Also kill the tmux session after stopping the task"
-    echo "  all                   Stop all 4 standard sessions (GPUs 0-3)"
+    echo "  all                   Stop all 8 standard sessions (GPUs 0-7)"
     echo ""
     echo "Examples:"
     echo "  bash stop_tasks.sh 0 1 2 3"
@@ -70,6 +70,9 @@ echo ""
 STOPPED_COUNT=0
 FAILED_COUNT=0
 
+# Temporarily disable exit on error for the loop
+set +e
+
 for gpu in "${GPUS[@]}"; do
     SESSION_NAME="clagent-runs-$gpu"
     
@@ -83,7 +86,8 @@ for gpu in "${GPUS[@]}"; do
     echo "Stopping task in session: $SESSION_NAME (GPU $gpu)"
     
     # Send Ctrl-C to interrupt the running process
-    tmux send-keys -t "$SESSION_NAME" C-c
+    # Use || true to prevent script termination if send-keys fails
+    tmux send-keys -t "$SESSION_NAME" C-c || true
     
     # Wait a moment for graceful shutdown
     sleep 0.5
@@ -96,6 +100,9 @@ for gpu in "${GPUS[@]}"; do
     
     ((STOPPED_COUNT++))
 done
+
+# Re-enable exit on error
+set -e
 
 echo ""
 echo "=============================================================="

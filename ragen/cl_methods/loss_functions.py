@@ -3,6 +3,10 @@ Continual Learning Loss Functions
 
 This module provides loss functions for different CL methods.
 These functions are designed to be called from the worker during actor updates.
+
+Key changes for multi-LoRA architecture:
+- O-LoRA: Computes orthogonal loss between current task's LoRA and ALL previous tasks' LoRAs
+- SD-LoRA: No explicit loss, but supports forward pass modification with scaling factors
 """
 
 import os
@@ -22,87 +26,127 @@ def compute_olora_loss(
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     Compute O-LoRA orthogonal loss and L2 regularization.
-    
+
     O-LoRA ensures new LoRA parameters are orthogonal to frozen parameters
-    from previous tasks to minimize catastrophic forgetting.
-    
+    from ALL previous tasks to minimize catastrophic forgetting.
+
     Loss components:
-    1. Orthogonal loss: L_ortho = λ_ortho * Σ|A_frozen @ A_new.T|
+    1. Orthogonal loss: L_ortho = λ_ortho * Σ_task Σ_module |A_frozen @ A_new.T|
     2. L2 regularization: L_l2 = λ_l2 * Σ||A_new||_2
-    
+
     Args:
         model: The model containing LoRA layers
         cl_config: CL configuration dict containing:
             - lambda_ortho: Weight for orthogonal loss
             - lambda_l2: Weight for L2 regularization
             - current_task_idx: Current task index
-        frozen_lora_params: Dict of frozen LoRA parameters from previous tasks
+            - all_frozen_lora_params: Dict of ALL frozen LoRA params from previous tasks
+              Structure: {task_idx: {'A': {module_name: tensor}, 'B': {module_name: tensor}}}
+        frozen_lora_params: Dict of frozen LoRA parameters (backward compatibility)
             Structure: {module_name: {'A': tensor, 'B': tensor}}
         device: Device to compute on
-        
+
     Returns:
         Tuple of (total_cl_loss, metrics_dict)
     """
     lambda_ortho = cl_config.get('lambda_ortho', 0.5)
     lambda_l2 = cl_config.get('lambda_l2', 0.0)
     current_task_idx = cl_config.get('current_task_idx', 0)
-    
+
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
+
     # Skip for first task (no frozen params)
-    if current_task_idx == 0 or frozen_lora_params is None or len(frozen_lora_params) == 0:
+    if current_task_idx == 0:
         return torch.tensor(0.0, device=device, requires_grad=False), {
             'cl/ortho_loss': 0.0,
             'cl/l2_loss': 0.0,
             'cl/total_loss': 0.0,
         }
-    
+
+    # Get all frozen LoRA params from all previous tasks
+    all_frozen_lora_params = cl_config.get('all_frozen_lora_params', {})
+
+    # Backward compatibility: if all_frozen_lora_params is empty, use frozen_lora_params
+    if not all_frozen_lora_params and frozen_lora_params:
+        # Convert old format to new format
+        all_frozen_lora_params = {
+            current_task_idx - 1: {
+                'A': {name: params['A'] for name, params in frozen_lora_params.items() if params.get('A') is not None},
+                'B': {name: params['B'] for name, params in frozen_lora_params.items() if params.get('B') is not None},
+            }
+        }
+
+    if not all_frozen_lora_params:
+        return torch.tensor(0.0, device=device, requires_grad=False), {
+            'cl/ortho_loss': 0.0,
+            'cl/l2_loss': 0.0,
+            'cl/total_loss': 0.0,
+        }
+
     ortho_loss = torch.tensor(0.0, device=device)
     l2_loss = torch.tensor(0.0, device=device)
-    
+    num_ortho_pairs = 0
+
     # Collect current LoRA parameters
     current_lora_params = _extract_lora_params(model)
-    
-    # Compute orthogonal loss
-    # Use torch.no_grad() for frozen params to avoid unnecessary computation
-    for name, frozen_params in frozen_lora_params.items():
-        if name in current_lora_params:
-            current_a = current_lora_params[name]['A']
-            
-            if frozen_params.get('A') is not None and current_a is not None:
+
+    # Compute orthogonal loss against ALL previous tasks
+    for task_idx, task_frozen_params in all_frozen_lora_params.items():
+        frozen_A_dict = task_frozen_params.get('A', {})
+
+        for module_name, current_params in current_lora_params.items():
+            current_a = current_params.get('A')
+            if current_a is None:
+                continue
+
+            # Find matching frozen A matrix
+            frozen_a = None
+            if module_name in frozen_A_dict:
+                frozen_a = frozen_A_dict[module_name]
+            else:
+                # Try to find by partial match (handle different naming conventions)
+                for frozen_name, frozen_tensor in frozen_A_dict.items():
+                    if frozen_name in module_name or module_name in frozen_name:
+                        frozen_a = frozen_tensor
+                        break
+
+            if frozen_a is not None:
                 # Move frozen param to device with no_grad to save memory
                 with torch.no_grad():
-                    frozen_a = frozen_params['A'].to(device, non_blocking=True)
-                
+                    frozen_a_device = frozen_a.to(device, non_blocking=True)
+
                 # Orthogonal loss: |frozen_A @ current_A.T|
                 # frozen_A: [r_frozen, in_features]
                 # current_A: [r_new, in_features]
-                ortho_product = torch.mm(frozen_a, current_a.T)
+                ortho_product = torch.mm(frozen_a_device, current_a.T)
                 ortho_loss = ortho_loss + torch.abs(ortho_product).sum()
-                
+                num_ortho_pairs += 1
+
                 # Explicitly delete to free memory
-                del frozen_a
-    
+                del frozen_a_device
+
     # Compute L2 regularization on current LoRA params
     if lambda_l2 > 0:
         for name, params in current_lora_params.items():
-            if params['A'] is not None:
+            if params.get('A') is not None:
                 l2_loss = l2_loss + torch.norm(params['A'], p=2)
-            if params['B'] is not None:
+            if params.get('B') is not None:
                 l2_loss = l2_loss + torch.norm(params['B'], p=2)
-    
+
     # Total CL loss
     total_cl_loss = lambda_ortho * ortho_loss + lambda_l2 * l2_loss
-    
+
     metrics = {
         'cl/ortho_loss': ortho_loss.detach().item(),
         'cl/l2_loss': l2_loss.detach().item(),
         'cl/total_loss': total_cl_loss.detach().item(),
         'cl/lambda_ortho': lambda_ortho,
         'cl/lambda_l2': lambda_l2,
+        'cl/num_frozen_tasks': len(all_frozen_lora_params),
+        'cl/num_ortho_pairs': num_ortho_pairs,
     }
-    
+
     return total_cl_loss, metrics
 
 
@@ -110,22 +154,22 @@ def _extract_lora_params(model: nn.Module) -> Dict[str, Dict[str, torch.Tensor]]
     """
     Extract LoRA A and B parameters from a model.
     Works with both FSDP-wrapped and regular models.
-    
+
     Returns:
         Dict mapping module names to {'A': tensor, 'B': tensor}
     """
     lora_params = {}
-    
+
     # For FSDP wrapped models, we iterate directly - FSDP handles the parameter access
     module_to_search = model
-    
+
     try:
         for name, module in module_to_search.named_modules():
             # Check for PEFT-style LoRA layers
             if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
                 lora_a = None
                 lora_b = None
-                
+
                 try:
                     # Handle different LoRA implementations
                     if isinstance(module.lora_A, nn.ModuleDict):
@@ -148,7 +192,7 @@ def _extract_lora_params(model: nn.Module) -> Dict[str, Dict[str, torch.Tensor]]
                             lora_a = module.lora_A.default.weight
                         if hasattr(module.lora_B.default, 'weight'):
                             lora_b = module.lora_B.default.weight
-                    
+
                     if lora_a is not None or lora_b is not None:
                         lora_params[name] = {'A': lora_a, 'B': lora_b}
                 except Exception as e:
@@ -157,7 +201,7 @@ def _extract_lora_params(model: nn.Module) -> Dict[str, Dict[str, torch.Tensor]]
                     continue
     except Exception as e:
         print(f"[CL Warning] Error extracting LoRA params: {e}")
-    
+
     return lora_params
 
 
@@ -167,33 +211,33 @@ def load_frozen_lora_params_from_checkpoint(
 ) -> Dict[str, Dict[str, torch.Tensor]]:
     """
     Load frozen LoRA parameters from a checkpoint.
-    
+
     This is used to load LoRA parameters from previous tasks for
     computing the orthogonal loss.
-    
+
     Args:
         checkpoint_path: Path to the checkpoint directory
         device: Device to load tensors to
-        
+
     Returns:
         Dict mapping module names to {'A': tensor, 'B': tensor}
     """
     if device is None:
         device = torch.device('cpu')
-    
+
     frozen_params = {}
-    
+
     if not os.path.exists(checkpoint_path):
-        print(f"[O-LoRA] Checkpoint path not found: {checkpoint_path}")
+        print(f"[CL] Checkpoint path not found: {checkpoint_path}")
         return frozen_params
-    
+
     # Find the actor checkpoint file - try multiple possible locations
     possible_paths = [
         os.path.join(checkpoint_path, 'actor'),
         os.path.join(checkpoint_path, 'actor_model'),
         checkpoint_path,  # Sometimes the checkpoint is directly in the path
     ]
-    
+
     actor_path = None
     for path in possible_paths:
         if os.path.exists(path) and os.path.isdir(path):
@@ -202,31 +246,34 @@ def load_frozen_lora_params_from_checkpoint(
             if any(f.endswith('.pt') or f.endswith('.bin') or f.endswith('.safetensors') for f in files):
                 actor_path = path
                 break
-    
+
     if actor_path is None:
-        print(f"[O-LoRA] No valid actor checkpoint found in {checkpoint_path}")
+        print(f"[CL] No valid actor checkpoint found in {checkpoint_path}")
         return frozen_params
-    
+
     # Load model weights - look for model files with different formats
     model_files = []
     for f in os.listdir(actor_path):
-        if (f.startswith('model_') or f.startswith('pytorch_model') or 
+        if (f.startswith('model_') or f.startswith('pytorch_model') or
             f.startswith('adapter_model')) and (f.endswith('.pt') or f.endswith('.bin')):
             model_files.append(f)
-    
+
     # Also check for safetensors
     safetensor_files = [f for f in os.listdir(actor_path) if f.endswith('.safetensors')]
-    
+
     if not model_files and not safetensor_files:
-        print(f"[O-LoRA] No model files found in {actor_path}")
-        print(f"[O-LoRA] Available files: {os.listdir(actor_path)}")
+        print(f"[CL] No model files found in {actor_path}")
+        print(f"[CL] Available files: {os.listdir(actor_path)}")
         return frozen_params
-    
+
     # Prefer .pt/.bin files
+    state_dict = None
+    model_path = None
+
     if model_files:
         model_file = sorted(model_files)[0]
         model_path = os.path.join(actor_path, model_file)
-        
+
         try:
             state_dict = torch.load(model_path, map_location=device, weights_only=True)
         except TypeError:
@@ -239,9 +286,12 @@ def load_frozen_lora_params_from_checkpoint(
             model_path = os.path.join(actor_path, model_file)
             state_dict = load_file(model_path, device=str(device))
         except ImportError:
-            print("[O-LoRA] safetensors not available, cannot load checkpoint")
+            print("[CL] safetensors not available, cannot load checkpoint")
             return frozen_params
-    
+
+    if state_dict is None:
+        return frozen_params
+
     try:
         # Extract LoRA parameters from state dict
         for key, value in state_dict.items():
@@ -252,33 +302,33 @@ def load_frozen_lora_params_from_checkpoint(
                     base_name = key.rsplit('.lora_A', 1)[0]
                 else:
                     base_name = key.rsplit('.lora_a', 1)[0]
-                    
+
                 # Normalize base name (remove adapter suffix if present)
                 base_name = base_name.replace('.default', '').replace('.adapter', '')
-                
+
                 if base_name not in frozen_params:
                     frozen_params[base_name] = {'A': None, 'B': None}
                 frozen_params[base_name]['A'] = value.clone().to(device)
-                
+
             elif 'lora_B' in key or 'lora_b' in key:
                 if 'lora_B' in key:
                     base_name = key.rsplit('.lora_B', 1)[0]
                 else:
                     base_name = key.rsplit('.lora_b', 1)[0]
-                    
+
                 base_name = base_name.replace('.default', '').replace('.adapter', '')
-                
+
                 if base_name not in frozen_params:
                     frozen_params[base_name] = {'A': None, 'B': None}
                 frozen_params[base_name]['B'] = value.clone().to(device)
-        
-        print(f"[O-LoRA] Loaded {len(frozen_params)} frozen LoRA modules from {model_path}")
-        
+
+        print(f"[CL] Loaded {len(frozen_params)} frozen LoRA modules from {model_path}")
+
     except Exception as e:
-        print(f"[O-LoRA] Error loading checkpoint: {e}")
+        print(f"[CL] Error loading checkpoint: {e}")
         import traceback
         traceback.print_exc()
-    
+
     return frozen_params
 
 
@@ -286,7 +336,7 @@ def reinitialize_lora_params(model: nn.Module) -> None:
     """
     Reinitialize LoRA parameters for a new task.
     Uses Kaiming initialization for A and zeros for B (standard LoRA init).
-    
+
     Args:
         model: The model containing LoRA layers
     """
@@ -310,8 +360,8 @@ def reinitialize_lora_params(model: nn.Module) -> None:
                     nn.init.kaiming_uniform_(module.lora_A.default.weight, a=math.sqrt(5))
                 if hasattr(module.lora_B.default, 'weight'):
                     nn.init.zeros_(module.lora_B.default.weight)
-    
-    print(f"[O-LoRA] Reinitialized LoRA parameters for new task")
+
+    print(f"[CL] Reinitialized LoRA parameters for new task")
 
 
 def compute_sdlora_loss(
@@ -327,17 +377,15 @@ def compute_sdlora_loss(
     multiple LoRA adapters with learnable scaling factors. It doesn't
     have an explicit CL loss like O-LoRA's orthogonal constraint.
 
-    However, we can optionally add regularization terms:
-    1. Scaling factor regularization: Encourage scaling factors to stay bounded
-    2. Diversity regularization: Encourage different tasks to have different contributions
+    The forward pass modification is handled separately in the worker.
 
     Args:
         model: The model containing LoRA layers
         cl_config: CL configuration dict containing:
             - scaling_factors: Dict of task_idx -> scaling_factor
             - current_task_idx: Current task index
-            - lambda_scaling_reg: Weight for scaling factor regularization (optional)
-        frozen_lora_params: Dict of frozen LoRA parameters (not used for loss, but for forward)
+            - all_frozen_lora_params: All frozen LoRA params from previous tasks
+        frozen_lora_params: Dict of frozen LoRA parameters (not used for loss)
         device: Device to compute on
 
     Returns:
@@ -347,6 +395,7 @@ def compute_sdlora_loss(
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     current_task_idx = cl_config.get('current_task_idx', 0)
+    all_frozen_lora_params = cl_config.get('all_frozen_lora_params', {})
 
     # SD-LoRA doesn't have explicit CL loss by default
     # The continual learning is handled by the forward pass modification
@@ -356,15 +405,114 @@ def compute_sdlora_loss(
         'cl/sdlora_loss': 0.0,
         'cl/total_loss': 0.0,
         'cl/current_task': current_task_idx,
+        'cl/num_frozen_tasks': len(all_frozen_lora_params),
         'cl/num_scaling_factors': len(cl_config.get('scaling_factors', {})),
     }
 
     # Log scaling factors for monitoring
     scaling_factors = cl_config.get('scaling_factors', {})
     for task_idx, sf in scaling_factors.items():
-        metrics[f'cl/scaling_factor_task{task_idx}'] = sf if isinstance(sf, float) else sf.item() if hasattr(sf, 'item') else float(sf)
+        sf_value = sf if isinstance(sf, (int, float)) else sf.item() if hasattr(sf, 'item') else float(sf)
+        metrics[f'cl/scaling_factor_task{task_idx}'] = sf_value
 
     return torch.tensor(0.0, device=device, requires_grad=False), metrics
+
+
+def compute_frozen_lora_output(
+    x: torch.Tensor,
+    all_frozen_lora_params: Dict[int, Dict[str, Any]],
+    module_name: str,
+    method: str = 'olora',
+    normalize: bool = True,
+    lora_scaling: float = 1.0,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """
+    Compute the combined output from all frozen task LoRAs for a specific module.
+
+    This function is used during forward pass to add contributions from
+    all previous tasks' LoRA modules.
+
+    For O-LoRA: output = Σ_i (B_i @ A_i @ x) * scaling
+    For SD-LoRA: output = Σ_i scaling_factor[i] * (B_i @ A_i @ x) / (||B_i|| * ||A_i||)
+
+    Args:
+        x: Input tensor [batch, seq_len, hidden_dim]
+        all_frozen_lora_params: Dict of frozen LoRA params from all previous tasks
+            Structure: {task_idx: {'A': {module_name: tensor}, 'B': {...}, 'scaling_factor': float}}
+        module_name: Name of the module (to look up correct LoRA params)
+        method: 'olora' or 'sdlora'
+        normalize: Whether to normalize by weight norms (for SD-LoRA)
+        lora_scaling: LoRA scaling factor (alpha/r)
+        device: Device to compute on
+
+    Returns:
+        Combined LoRA output tensor
+    """
+    if device is None:
+        device = x.device
+
+    if not all_frozen_lora_params:
+        return torch.zeros_like(x)
+
+    combined_output = torch.zeros_like(x)
+
+    for task_idx, task_params in all_frozen_lora_params.items():
+        A_dict = task_params.get('A', {})
+        B_dict = task_params.get('B', {})
+        scaling_factor = task_params.get('scaling_factor', 1.0)
+
+        # Find matching A and B matrices
+        A = None
+        B = None
+
+        if module_name in A_dict:
+            A = A_dict[module_name]
+        if module_name in B_dict:
+            B = B_dict[module_name]
+
+        # Try partial match if exact match not found
+        if A is None:
+            for name, tensor in A_dict.items():
+                if name in module_name or module_name in name:
+                    A = tensor
+                    break
+        if B is None:
+            for name, tensor in B_dict.items():
+                if name in module_name or module_name in name:
+                    B = tensor
+                    break
+
+        if A is None or B is None:
+            continue
+
+        # Move to device
+        with torch.no_grad():
+            A = A.to(device)
+            B = B.to(device)
+
+            # Compute LoRA output: B @ A @ x
+            # A: [r, in_features], B: [out_features, r]
+            # x: [batch, seq_len, in_features]
+            # x @ A.T -> [batch, seq_len, r]
+            # then @ B.T -> [batch, seq_len, out_features]
+            lora_out = F.linear(F.linear(x, A), B)
+
+            if method == 'sdlora' and normalize:
+                # Normalize by weight norms
+                norm_A = torch.norm(A)
+                norm_B = torch.norm(B)
+                if norm_A > 0 and norm_B > 0:
+                    lora_out = lora_out / (norm_A * norm_B)
+                # Apply scaling factor
+                lora_out = lora_out * scaling_factor
+            else:
+                # O-LoRA: just apply standard scaling
+                lora_out = lora_out * lora_scaling
+
+            combined_output = combined_output + lora_out
+
+    return combined_output
 
 
 def get_cl_loss_fn(method_name: str):
@@ -393,4 +541,3 @@ def get_cl_loss_fn(method_name: str):
         return loss_functions['baseline']
 
     return loss_functions[method_name]
-

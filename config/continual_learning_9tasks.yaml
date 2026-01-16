@@ -34,7 +34,7 @@ trainer:
   project_name: ragen_continual_learning_9tasks
   experiment_name: cl_baseline_9tasks
   total_training_steps: 200  # Will be overridden per task
-  test_freq: 100  # Validate every 100 steps on all seen tasks
+  test_freq: 20  # Validate every 100 steps on all seen tasks
   save_freq: 200  # Save checkpoint at end of each task
   val_before_train: True
   generations_to_log_to_wandb:
@@ -54,7 +54,7 @@ continual_learning:
   checkpoint_base_dir: checkpoints
 
   # Number of training steps per task
-  steps_per_task: 200
+  steps_per_task: 100
 
   # Resume from checkpoint (optional)
   resume_checkpoint: null

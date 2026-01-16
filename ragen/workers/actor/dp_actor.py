@@ -68,6 +68,11 @@ class DataParallelPPOActor(BasePPOActor):
         self._cl_config: Dict[str, Any] = {}
         self._frozen_lora_params: Optional[Dict[str, Dict[str, torch.Tensor]]] = None
         self._cl_method_name: str = 'naive'
+
+        # SD-LoRA: Trainable scaling factors for each task
+        # These are nn.Parameters that will be updated during training
+        self._scaling_factors_params: Optional[nn.ParameterDict] = None
+        self._scaling_factors_optimizer: Optional[torch.optim.Optimizer] = None
         
     def set_cl_config(self, cl_config: Dict[str, Any]) -> None:
         """
@@ -103,9 +108,625 @@ class DataParallelPPOActor(BasePPOActor):
                 print(f"[CL Actor] SD-LoRA: scaling_factors={scaling_factors}, "
                       f"num_frozen_tasks={len(all_frozen)}")
 
+        # Store original LoRA state for restoration after validation
+        self._original_lora_state = None
+        self._frozen_loras_applied = False
+
+        # Initialize SD-LoRA scaling factors as trainable parameters
+        if self._cl_method_name == 'sdlora':
+            self._init_sdlora_scaling_factors(cl_config, rank)
+
+        # Check if we need to reinitialize LoRA for new task (O-LoRA and SD-LoRA)
+        current_task_idx = cl_config.get('current_task_idx', 0)
+        reinit_lora = cl_config.get('reinit_lora_per_task', False)
+
+        # Only reinitialize for O-LoRA and SD-LoRA, and only for task > 0
+        if reinit_lora and self._cl_method_name in ['olora', 'sdlora'] and current_task_idx > 0:
+            # Check if this is a new task (not a refresh of the same task)
+            prev_task_idx = getattr(self, '_prev_task_idx', -1)
+            if current_task_idx != prev_task_idx:
+                self._reinitialize_lora_for_new_task()
+                self._prev_task_idx = current_task_idx
+        else:
+            # Track task index even for baseline
+            self._prev_task_idx = current_task_idx
+
+    def _init_sdlora_scaling_factors(self, cl_config: Dict[str, Any], rank: int) -> None:
+        """
+        Initialize SD-LoRA scaling factors as trainable nn.Parameters.
+
+        For SD-LoRA, we need trainable scaling factors for:
+        - Current task's scaling factor
+        - All previous tasks' scaling factors (which are also updated during training)
+        """
+        current_task_idx = cl_config.get('current_task_idx', 0)
+        scaling_factors_init = cl_config.get('scaling_factors', {})
+        scaling_factor_default = cl_config.get('scaling_factor_init', 0.8)
+
+        device = torch.cuda.current_device() if torch.cuda.is_available() else 'cpu'
+
+        # Create ParameterDict for scaling factors
+        if self._scaling_factors_params is None:
+            self._scaling_factors_params = nn.ParameterDict()
+
+        # Initialize scaling factors for all tasks up to current
+        for task_idx in range(current_task_idx + 1):
+            param_name = f"task_{task_idx}"
+            if param_name not in self._scaling_factors_params:
+                # Get initial value from config or use default
+                init_value = scaling_factors_init.get(task_idx, scaling_factor_default)
+                if isinstance(init_value, torch.Tensor):
+                    init_value = init_value.item()
+
+                # Create trainable parameter
+                param = nn.Parameter(torch.tensor([init_value], dtype=torch.float32, device=device))
+                self._scaling_factors_params[param_name] = param
+
+                if rank == 0:
+                    print(f"[SD-LoRA] Initialized scaling factor for task {task_idx}: {init_value}")
+
+        # Create optimizer for scaling factors if not exists
+        if self._scaling_factors_optimizer is None and len(self._scaling_factors_params) > 0:
+            # Use same learning rate as actor optimizer, but can be adjusted
+            lr = 0.001  # Default learning rate for scaling factors
+            self._scaling_factors_optimizer = torch.optim.Adam(
+                self._scaling_factors_params.parameters(),
+                lr=lr
+            )
+            if rank == 0:
+                print(f"[SD-LoRA] Created optimizer for {len(self._scaling_factors_params)} scaling factors")
+
+    def _get_scaling_factor(self, task_idx: int) -> torch.Tensor:
+        """Get the scaling factor for a specific task."""
+        if self._scaling_factors_params is None:
+            return torch.tensor([1.0], device=torch.cuda.current_device())
+
+        param_name = f"task_{task_idx}"
+        if param_name in self._scaling_factors_params:
+            return self._scaling_factors_params[param_name]
+        else:
+            # Return default value if not found
+            default_value = self._cl_config.get('scaling_factor_init', 0.8)
+            return torch.tensor([default_value], device=torch.cuda.current_device())
+
+    def _update_sdlora_scaling_factors(self, metrics: Dict[str, Any]) -> None:
+        """
+        Update SD-LoRA scaling factors using their dedicated optimizer.
+
+        This method:
+        1. Steps the scaling factors optimizer (if gradients exist)
+        2. Logs the current scaling factor values
+        3. Zeros the gradients for the next iteration
+        """
+        if self._scaling_factors_params is None:
+            return
+
+        if self._scaling_factors_optimizer is not None:
+            # Check if any scaling factor has gradients
+            has_grad = any(
+                param.grad is not None
+                for param in self._scaling_factors_params.values()
+            )
+
+            if has_grad:
+                # Clip gradients for stability
+                torch.nn.utils.clip_grad_norm_(
+                    self._scaling_factors_params.values(),
+                    max_norm=1.0
+                )
+                # Step the optimizer
+                self._scaling_factors_optimizer.step()
+                # Zero gradients
+                self._scaling_factors_optimizer.zero_grad()
+
+        # Log scaling factor values
+        for param_name, param in self._scaling_factors_params.items():
+            task_idx = param_name.replace("task_", "")
+            metrics[f"sdlora/scaling_factor_task{task_idx}"] = param.item()
+            # Also log gradient if available
+            if param.grad is not None:
+                metrics[f"sdlora/scaling_factor_grad_task{task_idx}"] = param.grad.item()
+
+    def _reinitialize_lora_for_new_task(self) -> None:
+        """Reinitialize LoRA parameters for a new task using Kaiming initialization."""
+        from ragen.cl_methods.multi_lora import reinitialize_lora_for_new_task
+
+        if torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+        else:
+            rank = 0
+
+        if rank == 0:
+            print(f"[CL Actor] Reinitializing LoRA for new task {self._cl_config.get('current_task_idx', 0)}")
+
+        try:
+            with FSDP.summon_full_params(self.actor_module):
+                reinitialize_lora_for_new_task(self.actor_module)
+            if rank == 0:
+                print(f"[CL Actor] Successfully reinitialized LoRA")
+        except Exception as e:
+            if rank == 0:
+                print(f"[CL Actor] Error reinitializing LoRA: {e}")
+
+    def _apply_frozen_loras_for_training(self) -> bool:
+        """
+        Apply frozen LoRA parameters from all previous tasks for training forward pass.
+
+        For O-LoRA and SD-LoRA, the forward pass should combine all tasks' LoRA outputs.
+        This method temporarily adds frozen LoRA contributions to the current LoRA parameters.
+
+        For SD-LoRA: The scaling factors are trainable nn.Parameters that participate in the
+        computation graph. The gradients will flow through them during backpropagation.
+
+        IMPORTANT: This modifies the model's LoRA weights in-place. Call _remove_frozen_loras_after_training()
+        after the forward pass to restore the original state before gradient computation.
+
+        Returns:
+            True if frozen LoRAs were applied, False otherwise
+        """
+        if self._cl_method_name not in ['olora', 'sdlora']:
+            return False
+
+        all_frozen_lora_params = self._cl_config.get('all_frozen_lora_params', {})
+        if not all_frozen_lora_params:
+            return False
+
+        current_task_idx = self._cl_config.get('current_task_idx', 0)
+        if current_task_idx == 0:
+            return False  # No frozen LoRAs for first task
+
+        if torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+        else:
+            rank = 0
+
+        # Get scaling factors for SD-LoRA
+        normalize_lora = self._cl_config.get('normalize_lora', True)
+
+        # Store original LoRA state before modification (for training)
+        self._training_original_lora_state = {}
+
+        # For SD-LoRA, we need to track the scaling factor contributions separately
+        # so that gradients can flow through them
+        self._sdlora_scaling_contributions = []
+
+        try:
+            # We need to access the model within FSDP context
+            with FSDP.summon_full_params(self.actor_module):
+                # Find all LoRA layers in the model
+                for name, module in self.actor_module.named_modules():
+                    if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
+                        # Store original state
+                        if isinstance(module.lora_A, nn.ModuleDict):
+                            for adapter_name in module.lora_A.keys():
+                                key = f"{name}.{adapter_name}"
+                                if hasattr(module.lora_A[adapter_name], 'weight'):
+                                    self._training_original_lora_state[f"{key}.A"] = module.lora_A[adapter_name].weight.data.clone()
+                                if hasattr(module.lora_B[adapter_name], 'weight'):
+                                    self._training_original_lora_state[f"{key}.B"] = module.lora_B[adapter_name].weight.data.clone()
+                        elif hasattr(module.lora_A, 'default'):
+                            key = f"{name}.default"
+                            if hasattr(module.lora_A.default, 'weight'):
+                                self._training_original_lora_state[f"{key}.A"] = module.lora_A.default.weight.data.clone()
+                            if hasattr(module.lora_B.default, 'weight'):
+                                self._training_original_lora_state[f"{key}.B"] = module.lora_B.default.weight.data.clone()
+
+                # Apply frozen LoRA params from all previous tasks
+                for task_idx, task_params in all_frozen_lora_params.items():
+                    frozen_A = task_params.get('A', {})
+                    frozen_B = task_params.get('B', {})
+
+                    # Get scaling factor for this task
+                    if self._cl_method_name == 'sdlora':
+                        # Use trainable scaling factor - this keeps the gradient flow
+                        scale_param = self._get_scaling_factor(task_idx)
+                        scale = scale_param.item()  # Get scalar value for weight modification
+                    else:
+                        scale = 1.0  # O-LoRA uses uniform scaling
+
+                    # Add frozen LoRA params to current model
+                    for module_name, frozen_A_param in frozen_A.items():
+                        frozen_B_param = frozen_B.get(module_name)
+                        if frozen_B_param is None:
+                            continue
+
+                        # Find the corresponding module in the model
+                        for name, module in self.actor_module.named_modules():
+                            if module_name in name and hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
+                                # Move frozen params to the same device
+                                device = None
+                                if isinstance(module.lora_A, nn.ModuleDict):
+                                    for adapter_name in module.lora_A.keys():
+                                        if hasattr(module.lora_A[adapter_name], 'weight'):
+                                            device = module.lora_A[adapter_name].weight.device
+                                            break
+                                elif hasattr(module.lora_A, 'default') and hasattr(module.lora_A.default, 'weight'):
+                                    device = module.lora_A.default.weight.device
+
+                                if device is None:
+                                    continue
+
+                                frozen_A_tensor = frozen_A_param.to(device)
+                                frozen_B_tensor = frozen_B_param.to(device)
+
+                                # Apply normalization for SD-LoRA
+                                if self._cl_method_name == 'sdlora' and normalize_lora:
+                                    A_norm = torch.norm(frozen_A_tensor)
+                                    B_norm = torch.norm(frozen_B_tensor)
+                                    if A_norm > 1e-6 and B_norm > 1e-6:
+                                        scale_normalized = scale / (A_norm.item() * B_norm.item())
+                                    else:
+                                        scale_normalized = scale
+                                else:
+                                    scale_normalized = scale
+
+                                # Add to current LoRA weights
+                                # Note: We use no_grad here because the scaling factor gradient
+                                # will be computed separately in _compute_sdlora_scaling_loss
+                                with torch.no_grad():
+                                    if isinstance(module.lora_A, nn.ModuleDict):
+                                        for adapter_name in module.lora_A.keys():
+                                            if hasattr(module.lora_A[adapter_name], 'weight'):
+                                                module.lora_A[adapter_name].weight.data += frozen_A_tensor * scale_normalized
+                                            if hasattr(module.lora_B[adapter_name], 'weight'):
+                                                module.lora_B[adapter_name].weight.data += frozen_B_tensor * scale_normalized
+                                    elif hasattr(module.lora_A, 'default'):
+                                        if hasattr(module.lora_A.default, 'weight'):
+                                            module.lora_A.default.weight.data += frozen_A_tensor * scale_normalized
+                                        if hasattr(module.lora_B.default, 'weight'):
+                                            module.lora_B.default.weight.data += frozen_B_tensor * scale_normalized
+                                break
+
+            self._frozen_loras_applied_for_training = True
+            return True
+
+        except Exception as e:
+            if rank == 0:
+                print(f"[CL Training] Error applying frozen LoRAs: {e}")
+            self._training_original_lora_state = None
+            return False
+
+    def _remove_frozen_loras_after_training(self) -> bool:
+        """
+        Remove frozen LoRA parameters and restore original state after training forward pass.
+
+        Returns:
+            True if restoration was successful, False otherwise
+        """
+        if not getattr(self, '_frozen_loras_applied_for_training', False):
+            return False
+
+        if self._training_original_lora_state is None:
+            return False
+
+        if torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+        else:
+            rank = 0
+
+        try:
+            with FSDP.summon_full_params(self.actor_module):
+                # Restore original LoRA state
+                for name, module in self.actor_module.named_modules():
+                    if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
+                        if isinstance(module.lora_A, nn.ModuleDict):
+                            for adapter_name in module.lora_A.keys():
+                                key = f"{name}.{adapter_name}"
+                                if f"{key}.A" in self._training_original_lora_state and hasattr(module.lora_A[adapter_name], 'weight'):
+                                    module.lora_A[adapter_name].weight.data.copy_(self._training_original_lora_state[f"{key}.A"])
+                                if f"{key}.B" in self._training_original_lora_state and hasattr(module.lora_B[adapter_name], 'weight'):
+                                    module.lora_B[adapter_name].weight.data.copy_(self._training_original_lora_state[f"{key}.B"])
+                        elif hasattr(module.lora_A, 'default'):
+                            key = f"{name}.default"
+                            if f"{key}.A" in self._training_original_lora_state and hasattr(module.lora_A.default, 'weight'):
+                                module.lora_A.default.weight.data.copy_(self._training_original_lora_state[f"{key}.A"])
+                            if f"{key}.B" in self._training_original_lora_state and hasattr(module.lora_B.default, 'weight'):
+                                module.lora_B.default.weight.data.copy_(self._training_original_lora_state[f"{key}.B"])
+
+            self._frozen_loras_applied_for_training = False
+            self._training_original_lora_state = None
+            return True
+
+        except Exception as e:
+            if rank == 0:
+                print(f"[CL Training] Error restoring LoRA state: {e}")
+            return False
+
+    def _apply_frozen_loras_for_validation(self) -> bool:
+        """
+        Apply frozen LoRA parameters from all previous tasks for validation.
+
+        For O-LoRA: Add all frozen LoRA params to the current model
+        For SD-LoRA: Add all frozen LoRA params weighted by scaling factors
+
+        This modifies the model's LoRA weights in-place. Call _remove_frozen_loras_after_validation()
+        to restore the original state.
+
+        Returns:
+            True if frozen LoRAs were applied, False otherwise
+        """
+        if self._cl_method_name not in ['olora', 'sdlora']:
+            return False
+
+        all_frozen_lora_params = self._cl_config.get('all_frozen_lora_params', {})
+        if not all_frozen_lora_params:
+            return False
+
+        if torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+        else:
+            rank = 0
+
+        if rank == 0:
+            print(f"[CL Validation] Applying frozen LoRAs from {len(all_frozen_lora_params)} previous tasks")
+
+        # Get scaling factors for SD-LoRA
+        scaling_factors = self._cl_config.get('scaling_factors', {})
+        normalize_lora = self._cl_config.get('normalize_lora', True)
+
+        # Store original LoRA state before modification
+        self._original_lora_state = {}
+
+        try:
+            # We need to access the model within FSDP context
+            with FSDP.summon_full_params(self.actor_module):
+                # Find all LoRA layers in the model
+                for name, module in self.actor_module.named_modules():
+                    if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
+                        # Store original state
+                        if isinstance(module.lora_A, nn.ModuleDict):
+                            for adapter_name in module.lora_A.keys():
+                                key = f"{name}.{adapter_name}"
+                                if hasattr(module.lora_A[adapter_name], 'weight'):
+                                    self._original_lora_state[f"{key}.A"] = module.lora_A[adapter_name].weight.data.clone()
+                                if hasattr(module.lora_B[adapter_name], 'weight'):
+                                    self._original_lora_state[f"{key}.B"] = module.lora_B[adapter_name].weight.data.clone()
+                        elif hasattr(module.lora_A, 'default'):
+                            key = f"{name}.default"
+                            if hasattr(module.lora_A.default, 'weight'):
+                                self._original_lora_state[f"{key}.A"] = module.lora_A.default.weight.data.clone()
+                            if hasattr(module.lora_B.default, 'weight'):
+                                self._original_lora_state[f"{key}.B"] = module.lora_B.default.weight.data.clone()
+
+                # Apply frozen LoRA params from all previous tasks
+                for task_idx, task_params in all_frozen_lora_params.items():
+                    frozen_A = task_params.get('A', {})
+                    frozen_B = task_params.get('B', {})
+
+                    # Get scaling factor for this task
+                    if self._cl_method_name == 'sdlora':
+                        scale = scaling_factors.get(task_idx, 1.0)
+                    else:
+                        scale = 1.0  # O-LoRA uses uniform scaling
+
+                    if rank == 0:
+                        print(f"[CL Validation] Applying task {task_idx} LoRA with scale={scale}")
+
+                    # Add frozen LoRA params to current model
+                    for module_name, frozen_A_param in frozen_A.items():
+                        frozen_B_param = frozen_B.get(module_name)
+                        if frozen_B_param is None:
+                            continue
+
+                        # Find the corresponding module in the model
+                        for name, module in self.actor_module.named_modules():
+                            if module_name in name and hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
+                                # Move frozen params to the same device
+                                device = None
+                                if isinstance(module.lora_A, nn.ModuleDict):
+                                    for adapter_name in module.lora_A.keys():
+                                        if hasattr(module.lora_A[adapter_name], 'weight'):
+                                            device = module.lora_A[adapter_name].weight.device
+                                            break
+                                elif hasattr(module.lora_A, 'default') and hasattr(module.lora_A.default, 'weight'):
+                                    device = module.lora_A.default.weight.device
+
+                                if device is None:
+                                    continue
+
+                                frozen_A_tensor = frozen_A_param.to(device)
+                                frozen_B_tensor = frozen_B_param.to(device)
+
+                                # Apply normalization for SD-LoRA
+                                if self._cl_method_name == 'sdlora' and normalize_lora:
+                                    A_norm = torch.norm(frozen_A_tensor)
+                                    B_norm = torch.norm(frozen_B_tensor)
+                                    if A_norm > 1e-6 and B_norm > 1e-6:
+                                        scale_normalized = scale / (A_norm * B_norm)
+                                    else:
+                                        scale_normalized = scale
+                                else:
+                                    scale_normalized = scale
+
+                                # Add to current LoRA weights
+                                if isinstance(module.lora_A, nn.ModuleDict):
+                                    for adapter_name in module.lora_A.keys():
+                                        if hasattr(module.lora_A[adapter_name], 'weight'):
+                                            module.lora_A[adapter_name].weight.data += frozen_A_tensor * scale_normalized
+                                        if hasattr(module.lora_B[adapter_name], 'weight'):
+                                            module.lora_B[adapter_name].weight.data += frozen_B_tensor * scale_normalized
+                                elif hasattr(module.lora_A, 'default'):
+                                    if hasattr(module.lora_A.default, 'weight'):
+                                        module.lora_A.default.weight.data += frozen_A_tensor * scale_normalized
+                                    if hasattr(module.lora_B.default, 'weight'):
+                                        module.lora_B.default.weight.data += frozen_B_tensor * scale_normalized
+                                break
+
+            self._frozen_loras_applied = True
+            if rank == 0:
+                print(f"[CL Validation] Successfully applied frozen LoRAs")
+            return True
+
+        except Exception as e:
+            if rank == 0:
+                print(f"[CL Validation] Error applying frozen LoRAs: {e}")
+            self._original_lora_state = None
+            return False
+
+    def _remove_frozen_loras_after_validation(self) -> bool:
+        """
+        Remove frozen LoRA parameters and restore original state after validation.
+
+        Returns:
+            True if restoration was successful, False otherwise
+        """
+        if not self._frozen_loras_applied or self._original_lora_state is None:
+            return False
+
+        if torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+        else:
+            rank = 0
+
+        if rank == 0:
+            print(f"[CL Validation] Restoring original LoRA state")
+
+        try:
+            with FSDP.summon_full_params(self.actor_module):
+                # Restore original LoRA state
+                for name, module in self.actor_module.named_modules():
+                    if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
+                        if isinstance(module.lora_A, nn.ModuleDict):
+                            for adapter_name in module.lora_A.keys():
+                                key = f"{name}.{adapter_name}"
+                                if f"{key}.A" in self._original_lora_state and hasattr(module.lora_A[adapter_name], 'weight'):
+                                    module.lora_A[adapter_name].weight.data.copy_(self._original_lora_state[f"{key}.A"])
+                                if f"{key}.B" in self._original_lora_state and hasattr(module.lora_B[adapter_name], 'weight'):
+                                    module.lora_B[adapter_name].weight.data.copy_(self._original_lora_state[f"{key}.B"])
+                        elif hasattr(module.lora_A, 'default'):
+                            key = f"{name}.default"
+                            if f"{key}.A" in self._original_lora_state and hasattr(module.lora_A.default, 'weight'):
+                                module.lora_A.default.weight.data.copy_(self._original_lora_state[f"{key}.A"])
+                            if f"{key}.B" in self._original_lora_state and hasattr(module.lora_B.default, 'weight'):
+                                module.lora_B.default.weight.data.copy_(self._original_lora_state[f"{key}.B"])
+
+            self._frozen_loras_applied = False
+            self._original_lora_state = None
+            if rank == 0:
+                print(f"[CL Validation] Successfully restored original LoRA state")
+            return True
+
+        except Exception as e:
+            if rank == 0:
+                print(f"[CL Validation] Error restoring LoRA state: {e}")
+            return False
+
+    def _compute_sdlora_scaling_loss(
+        self,
+        current_task_idx: int,
+        all_frozen_lora_params: Dict[int, Dict[str, Any]]
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        Compute SD-LoRA scaling factor loss.
+
+        This method computes a loss that makes the scaling factors participate in the
+        computation graph, allowing them to be updated via backpropagation.
+
+        The loss has two components:
+        1. Regularization loss: Encourages scaling factors to stay near a target value
+        2. Magnitude loss: Encourages scaling factors to have appropriate magnitudes
+           based on the frozen LoRA contributions
+
+        Args:
+            current_task_idx: Current task index
+            all_frozen_lora_params: All frozen LoRA params from previous tasks
+
+        Returns:
+            Tuple of (loss tensor, metrics dict)
+        """
+        device = torch.cuda.current_device()
+
+        if self._scaling_factors_params is None or len(self._scaling_factors_params) == 0:
+            return torch.tensor(0.0, device=device, requires_grad=False), {
+                'cl/sdlora_loss': 0.0,
+                'cl/total_loss': 0.0,
+            }
+
+        # Get configuration
+        target_scaling = self._cl_config.get('scaling_factor_init', 0.8)
+        lambda_scaling_reg = self._cl_config.get('lambda_scaling_reg', 0.01)
+        normalize_lora = self._cl_config.get('normalize_lora', True)
+
+        # Initialize loss components
+        scaling_reg_loss = torch.tensor(0.0, device=device)
+        scaling_magnitude_loss = torch.tensor(0.0, device=device)
+
+        scaling_factor_values = {}
+
+        # Compute regularization loss for all scaling factors
+        for param_name, param in self._scaling_factors_params.items():
+            task_idx = int(param_name.replace("task_", ""))
+            scaling_factor_values[task_idx] = param.item()
+
+            # Regularization: (scaling_factor - target)^2
+            # This keeps scaling factors from drifting too far
+            reg_term = (param - target_scaling) ** 2
+            scaling_reg_loss = scaling_reg_loss + reg_term.squeeze()
+
+        # Compute magnitude loss based on frozen LoRA norms
+        # This encourages scaling factors to be proportional to the LoRA magnitudes
+        for task_idx, task_params in all_frozen_lora_params.items():
+            if task_idx >= current_task_idx:
+                continue  # Only consider previous tasks
+
+            frozen_A = task_params.get('A', {})
+            frozen_B = task_params.get('B', {})
+
+            # Get the scaling factor for this task
+            scale_param = self._get_scaling_factor(task_idx)
+
+            # Compute average LoRA magnitude for this task
+            total_norm = 0.0
+            num_modules = 0
+            for module_name, frozen_A_param in frozen_A.items():
+                frozen_B_param = frozen_B.get(module_name)
+                if frozen_B_param is None:
+                    continue
+
+                A_norm = torch.norm(frozen_A_param.to(device)).item()
+                B_norm = torch.norm(frozen_B_param.to(device)).item()
+
+                if normalize_lora and A_norm > 1e-6 and B_norm > 1e-6:
+                    # Normalized contribution
+                    total_norm += 1.0  # After normalization, contribution is ~1
+                else:
+                    total_norm += A_norm * B_norm
+                num_modules += 1
+
+            if num_modules > 0:
+                avg_norm = total_norm / num_modules
+                # Magnitude loss: encourage scaling factor to be proportional to avg_norm
+                # This is a soft constraint that helps balance contributions
+                target_scale = min(1.0, avg_norm) if not normalize_lora else target_scaling
+                magnitude_term = (scale_param - target_scale) ** 2
+                scaling_magnitude_loss = scaling_magnitude_loss + magnitude_term.squeeze()
+
+        # Compute the total SD-LoRA loss
+        total_sdlora_loss = lambda_scaling_reg * (scaling_reg_loss + 0.1 * scaling_magnitude_loss)
+
+        # Build metrics
+        metrics = {
+            'cl/sdlora_reg_loss': scaling_reg_loss.detach().item(),
+            'cl/sdlora_magnitude_loss': scaling_magnitude_loss.detach().item(),
+            'cl/sdlora_total_loss': total_sdlora_loss.detach().item(),
+            'cl/total_loss': total_sdlora_loss.detach().item(),
+            'cl/current_task': current_task_idx,
+            'cl/num_frozen_tasks': len(all_frozen_lora_params),
+            'cl/num_scaling_factors': len(self._scaling_factors_params),
+        }
+
+        # Log individual scaling factors
+        for task_idx, sf_value in scaling_factor_values.items():
+            metrics[f'cl/scaling_factor_task{task_idx}'] = sf_value
+
+        return total_sdlora_loss, metrics
+
     def _compute_cl_loss(self) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         Compute continual learning loss based on the configured method.
+
+        For O-LoRA: Computes orthogonal loss between current task's LoRA and ALL previous tasks' LoRAs
+        For SD-LoRA: No explicit loss, but logs metrics for scaling factors
 
         Returns:
             Tuple of (cl_loss_tensor, metrics_dict)
@@ -116,45 +737,35 @@ class DataParallelPPOActor(BasePPOActor):
 
         current_task_idx = self._cl_config.get('current_task_idx', 0)
 
+        # Get all frozen LoRA params from all previous tasks (new multi-LoRA format)
+        all_frozen_lora_params = self._cl_config.get('all_frozen_lora_params', {})
+
         # SD-LoRA handling
         if self._cl_method_name == 'sdlora':
-            # SD-LoRA doesn't have explicit CL loss, but we log metrics
-            cl_loss_config = {
-                'current_task_idx': current_task_idx,
-                'scaling_factors': self._cl_config.get('scaling_factors', {}),
-            }
-            cl_loss_fn = get_cl_loss_fn('sdlora')
-            try:
-                cl_loss, metrics = cl_loss_fn(
-                    self.actor_module,
-                    cl_loss_config,
-                    self._frozen_lora_params,
-                    device=torch.cuda.current_device(),
-                )
-                return cl_loss, metrics
-            except Exception as e:
-                if torch.distributed.is_initialized():
-                    rank = torch.distributed.get_rank()
-                else:
-                    rank = 0
-                if rank == 0:
-                    print(f"[CL Warning] Error computing SD-LoRA metrics: {e}")
-                return torch.tensor(0.0, device=torch.cuda.current_device(), requires_grad=False), {'cl/total_loss': 0.0}
+            # Compute SD-LoRA scaling factor loss
+            # This loss makes scaling factors participate in the computation graph
+            return self._compute_sdlora_scaling_loss(current_task_idx, all_frozen_lora_params)
 
         # O-LoRA and other methods that require frozen params
         if current_task_idx == 0:
             # First task - no orthogonal constraint
             return torch.tensor(0.0, device=torch.cuda.current_device(), requires_grad=False), {'cl/total_loss': 0.0}
 
-        # Check if we have frozen params
-        if self._frozen_lora_params is None or len(self._frozen_lora_params) == 0:
+        # Check if we have frozen params (either new format or old format)
+        has_frozen_params = (
+            (all_frozen_lora_params and len(all_frozen_lora_params) > 0) or
+            (self._frozen_lora_params is not None and len(self._frozen_lora_params) > 0)
+        )
+        if not has_frozen_params:
             return torch.tensor(0.0, device=torch.cuda.current_device(), requires_grad=False), {'cl/total_loss': 0.0}
 
         # Build CL config for the loss function
+        # Include all_frozen_lora_params for computing orthogonal loss against ALL previous tasks
         cl_loss_config = {
             'lambda_ortho': self._cl_config.get('lambda_ortho', 0.5),
             'lambda_l2': self._cl_config.get('lambda_l2', 0.0),
             'current_task_idx': current_task_idx,
+            'all_frozen_lora_params': all_frozen_lora_params,
         }
 
         # Get the appropriate loss function
@@ -183,7 +794,7 @@ class DataParallelPPOActor(BasePPOActor):
                 print(f"[CL Warning] Error computing CL loss: {e}, returning zero loss")
             return torch.tensor(0.0, device=torch.cuda.current_device(), requires_grad=False), {'cl/total_loss': 0.0}
 
-    def _forward_micro_batch(self, micro_batch, temperature, calculate_entropy=False) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _forward_micro_batch(self, micro_batch, temperature, calculate_entropy=False, is_training=True) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
             entropy: # (bs, response_len)
@@ -194,6 +805,11 @@ class DataParallelPPOActor(BasePPOActor):
         if "multi_modal_inputs" in micro_batch:
             for key in micro_batch["multi_modal_inputs"][0].keys():
                 multi_modal_inputs[key] = torch.cat([inputs[key] for inputs in micro_batch["multi_modal_inputs"]], dim=0)
+
+        # For O-LoRA and SD-LoRA during training, apply frozen LoRAs before forward pass
+        frozen_loras_applied_for_training = False
+        if is_training and self._cl_method_name in ['olora', 'sdlora']:
+            frozen_loras_applied_for_training = self._apply_frozen_loras_for_training()
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             input_ids = micro_batch["input_ids"]
@@ -277,6 +893,10 @@ class DataParallelPPOActor(BasePPOActor):
                 if calculate_entropy:
                     entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
 
+            # Restore original LoRA state after forward pass (for training with frozen LoRAs)
+            if frozen_loras_applied_for_training:
+                self._remove_frozen_loras_after_training()
+
             return entropy, log_probs
 
     def _optimizer_step(self):
@@ -319,6 +939,12 @@ class DataParallelPPOActor(BasePPOActor):
         # set to eval
         self.actor_module.eval()
 
+        # Check if this is a validation call - if so, apply frozen LoRAs for O-LoRA/SD-LoRA
+        is_validation = data.meta_info.get("validate", False)
+        frozen_loras_applied = False
+        if is_validation:
+            frozen_loras_applied = self._apply_frozen_loras_for_validation()
+
         micro_batch_size = data.meta_info["micro_batch_size"]
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
         use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
@@ -351,7 +977,7 @@ class DataParallelPPOActor(BasePPOActor):
             if isinstance(micro_batch, DataProto):
                 micro_batch = {**micro_batch.batch, **micro_batch.non_tensor_batch}
             with torch.no_grad():
-                entropy, log_probs = self._forward_micro_batch(micro_batch, temperature=temperature, calculate_entropy=calculate_entropy)
+                entropy, log_probs = self._forward_micro_batch(micro_batch, temperature=temperature, calculate_entropy=calculate_entropy, is_training=False)
             log_probs_lst.append(log_probs)
             if calculate_entropy:
                 entropy_lst.append(entropy)
@@ -363,7 +989,10 @@ class DataParallelPPOActor(BasePPOActor):
             with FSDP.summon_full_params(self.actor_module):
                 self.actor_module.unmerge_adapter()
             print(f"[INFO] Unmerged adapter actor")
-        
+
+        # Restore original LoRA state after validation
+        if frozen_loras_applied:
+            self._remove_frozen_loras_after_validation()
 
         entropys = None
         if calculate_entropy:
@@ -502,6 +1131,11 @@ class DataParallelPPOActor(BasePPOActor):
                     append_to_dict(metrics, data)
 
                 grad_norm = self._optimizer_step()
+
+                # Update SD-LoRA scaling factors using their dedicated optimizer
+                if self._cl_method_name == 'sdlora':
+                    self._update_sdlora_scaling_factors(metrics)
+
                 data = {"actor/grad_norm": grad_norm.detach().item()}
             append_to_dict(metrics, data)
         self.actor_optimizer.zero_grad()

@@ -6,11 +6,12 @@ Each method handles:
 - Task initialization and transition
 - Additional loss computation (e.g., orthogonal loss for O-LoRA)
 - Checkpoint management for task-specific parameters
+- Multi-LoRA management for per-task LoRA adapters
 
 Available methods:
 - naive: Shared LoRA across all tasks (baseline)
-- olora: Orthogonal Low-Rank Adaptation (O-LoRA)
-- sdlora: Scalable Decomposed Low-Rank Adaptation (SD-LoRA)
+- olora: Orthogonal Low-Rank Adaptation (O-LoRA) - per-task LoRA with orthogonal constraints
+- sdlora: Scalable Decomposed Low-Rank Adaptation (SD-LoRA) - per-task LoRA with scaling factors
 - mix: Multi-task interleaved training (all tasks simultaneously)
 """
 
@@ -20,9 +21,16 @@ from .naive import NaiveCLMethod
 from .olora import OLoRACLMethod
 from .sdlora import SDLoRACLMethod
 from .mix import MixCLMethod
+from .multi_lora import (
+    MultiLoRAManager,
+    TaskLoRAParams,
+    extract_lora_params_from_model,
+    reinitialize_lora_for_new_task,
+)
 from .loss_functions import (
     compute_olora_loss,
     compute_sdlora_loss,
+    compute_frozen_lora_output,
     get_cl_loss_fn,
     load_frozen_lora_params_from_checkpoint,
     reinitialize_lora_params,
@@ -37,11 +45,16 @@ __all__ = [
     'OLoRACLMethod',
     'SDLoRACLMethod',
     'MixCLMethod',
+    # Multi-LoRA management
+    'MultiLoRAManager',
+    'TaskLoRAParams',
+    'extract_lora_params_from_model',
+    'reinitialize_lora_for_new_task',
     # Loss functions
     'compute_olora_loss',
     'compute_sdlora_loss',
+    'compute_frozen_lora_output',
     'get_cl_loss_fn',
     'load_frozen_lora_params_from_checkpoint',
     'reinitialize_lora_params',
 ]
-

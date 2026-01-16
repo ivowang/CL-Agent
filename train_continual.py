@@ -44,6 +44,7 @@ from copy import deepcopy
 from ragen.cl_methods import get_cl_method
 from ragen.cl_methods.base import CLMethodConfig
 from ragen.cl_methods.olora import OLoRAConfig, OLoRACLMethod
+from ragen.cl_methods.sdlora import SDLoRAConfig, SDLoRACLMethod
 from ragen.cl_methods.naive import NaiveCLConfig, NaiveCLMethod
 
 
@@ -197,7 +198,7 @@ def get_global_steps_from_checkpoint(checkpoint_path):
 def init_cl_method(cl_method_config, task_idx, config, cl_method_state=None):
     """Initialize CL method with proper configuration."""
     method_name = cl_method_config.get('name', 'baseline')
-    
+
     if method_name == 'olora':
         method_cfg = OLoRAConfig(
             name='olora',
@@ -208,6 +209,17 @@ def init_cl_method(cl_method_config, task_idx, config, cl_method_state=None):
             checkpoint_base_dir=config.trainer.default_local_dir,
         )
         method = OLoRACLMethod(method_cfg)
+    elif method_name == 'sdlora':
+        method_cfg = SDLoRAConfig(
+            name='sdlora',
+            current_task_idx=task_idx,
+            scaling_factor_init=cl_method_config.get('scaling_factor_init', 0.8),
+            normalize_lora=cl_method_config.get('normalize_lora', True),
+            lora_rank_per_task=cl_method_config.get('lora_rank', 64),
+            reinit_lora_per_task=cl_method_config.get('reinit_lora_per_task', True),
+            checkpoint_base_dir=config.trainer.default_local_dir,
+        )
+        method = SDLoRACLMethod(method_cfg)
     else:
         method_cfg = NaiveCLConfig(
             name='baseline',
@@ -215,11 +227,11 @@ def init_cl_method(cl_method_config, task_idx, config, cl_method_state=None):
             checkpoint_base_dir=config.trainer.default_local_dir,
         )
         method = NaiveCLMethod(method_cfg)
-    
+
     # Restore state from previous tasks
     if cl_method_state:
         method.load_state_dict(cl_method_state)
-    
+
     return method
 
 
