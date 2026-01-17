@@ -73,6 +73,10 @@ class DataParallelPPOActor(BasePPOActor):
         # These are nn.Parameters that will be updated during training
         self._scaling_factors_params: Optional[nn.ParameterDict] = None
         self._scaling_factors_optimizer: Optional[torch.optim.Optimizer] = None
+
+        # HiDE-Prompt: Prompt-based continual learning
+        self._hideprompt_enabled = False
+        self._last_hidden_states: Optional[torch.Tensor] = None  # Store for feature extraction
         
     def set_cl_config(self, cl_config: Dict[str, Any]) -> None:
         """
@@ -115,6 +119,13 @@ class DataParallelPPOActor(BasePPOActor):
         # Initialize SD-LoRA scaling factors as trainable parameters
         if self._cl_method_name == 'sdlora':
             self._init_sdlora_scaling_factors(cl_config, rank)
+
+        # Initialize HiDE-Prompt if needed
+        if self._cl_method_name == 'hideprompt':
+            self._hideprompt_enabled = True
+            if rank == 0:
+                print(f"[CL Actor] HiDE-Prompt enabled: prompt_length={cl_config.get('prompt_length', 5)}, "
+                      f"reg_weight={cl_config.get('reg_weight', 0.1)}")
 
         # Check if we need to reinitialize LoRA for new task (O-LoRA and SD-LoRA)
         current_task_idx = cl_config.get('current_task_idx', 0)
@@ -721,12 +732,66 @@ class DataParallelPPOActor(BasePPOActor):
 
         return total_sdlora_loss, metrics
 
+    def _compute_hideprompt_contrastive_loss(self) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        Compute HiDE-Prompt contrastive regularization loss.
+
+        This encourages the current batch features to be orthogonal to stored
+        features from previous tasks, preventing catastrophic forgetting.
+
+        Returns:
+            Tuple of (loss tensor, metrics dict)
+        """
+        from ragen.cl_methods.trajectory_storage import compute_contrastive_loss
+
+        device = torch.cuda.current_device()
+
+        # Get configuration
+        reg_weight = self._cl_config.get('reg_weight', 0.1)
+        temperature = self._cl_config.get('temperature', 0.8)
+        stored_means = self._cl_config.get('stored_means', None)
+
+        # Check if we have stored hidden states from the forward pass
+        if self._last_hidden_states is None:
+            # No features available, return zero loss
+            return torch.tensor(0.0, device=device, requires_grad=False), {
+                'cl/contrastive_loss': 0.0,
+                'cl/total_loss': 0.0,
+            }
+
+        # Extract features from last hidden states
+        # Use the last token's hidden state as the feature representation
+        current_features = self._last_hidden_states[:, -1, :]  # (batch_size, hidden_dim)
+
+        # Move stored means to device if available
+        if stored_means is not None and stored_means.numel() > 0:
+            stored_means = stored_means.to(device)
+        else:
+            stored_means = None
+
+        # Compute contrastive loss
+        contrastive_loss = compute_contrastive_loss(
+            current_features=current_features,
+            stored_means=stored_means,
+            temperature=temperature,
+            reg_weight=reg_weight,
+        )
+
+        metrics = {
+            'cl/contrastive_loss': contrastive_loss.item(),
+            'cl/total_loss': contrastive_loss.item(),
+            'cl/num_stored_means': stored_means.shape[0] if stored_means is not None else 0,
+        }
+
+        return contrastive_loss, metrics
+
     def _compute_cl_loss(self) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         Compute continual learning loss based on the configured method.
 
         For O-LoRA: Computes orthogonal loss between current task's LoRA and ALL previous tasks' LoRAs
         For SD-LoRA: No explicit loss, but logs metrics for scaling factors
+        For HiDE-Prompt: Computes contrastive regularization loss
 
         Returns:
             Tuple of (cl_loss_tensor, metrics_dict)
@@ -736,6 +801,10 @@ class DataParallelPPOActor(BasePPOActor):
             return torch.tensor(0.0, device=torch.cuda.current_device(), requires_grad=False), {'cl/total_loss': 0.0}
 
         current_task_idx = self._cl_config.get('current_task_idx', 0)
+
+        # HiDE-Prompt handling
+        if self._cl_method_name == 'hideprompt':
+            return self._compute_hideprompt_contrastive_loss()
 
         # Get all frozen LoRA params from all previous tasks (new multi-LoRA format)
         all_frozen_lora_params = self._cl_config.get('all_frozen_lora_params', {})
@@ -885,7 +954,14 @@ class DataParallelPPOActor(BasePPOActor):
                     position_ids=position_ids,
                     **multi_modal_inputs,
                     use_cache=False,
+                    output_hidden_states=self._hideprompt_enabled and is_training,  # Request hidden states for HiDE-Prompt
                 )  # prevent model thinks we are generating
+
+                # Store hidden states for HiDE-Prompt contrastive loss
+                if self._hideprompt_enabled and is_training and hasattr(output, 'hidden_states') and output.hidden_states is not None:
+                    # Get the last layer's hidden states
+                    self._last_hidden_states = output.hidden_states[-1]  # (batch_size, seq_len, hidden_dim)
+
                 logits = output.logits
                 logits.div_(temperature)
                 logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)

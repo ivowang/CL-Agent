@@ -141,8 +141,8 @@ continual_learning:
 
 # Agent proxy settings
 agent_proxy:
-  max_turn: 5
-  max_actions_per_turn: 2
+  max_turn: 10
+  max_actions_per_turn: 5
 
 # ES Manager settings (will be overridden per task dynamically)
 es_manager:

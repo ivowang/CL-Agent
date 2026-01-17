@@ -72,8 +72,8 @@ mix_training:
 
 # Agent proxy settings
 agent_proxy:
-  max_turn: 5
-  max_actions_per_turn: 2
+  max_turn: 10
+  max_actions_per_turn: 5
 
 # ES Manager settings (initial placeholder, will be overridden to include all envs)
 # The actual mixed config is built dynamically in mix_trainer.py
