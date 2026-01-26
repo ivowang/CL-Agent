@@ -30,13 +30,18 @@ defaults:
   - base
   - _self_
 
+# System settings
+system:
+  CUDA_VISIBLE_DEVICES: "0"  # Single GPU for HiDE-Prompt
+
 # Override base settings for HiDE-Prompt continual learning
 trainer:
   project_name: ragen_continual_learning_9tasks
   experiment_name: cl_hideprompt_9tasks
-  total_training_steps: 200  # Will be overridden per task
+  n_gpus_per_node: 1  # Single GPU
+  total_training_steps: 900  # Will be overridden per task
   test_freq: 20  # Validate every 20 steps on all seen tasks
-  save_freq: 200  # Save checkpoint at end of each task
+  save_freq: 100  # Save checkpoint at end of each task
   val_before_train: True
   generations_to_log_to_wandb:
     val: 20
@@ -140,8 +145,8 @@ continual_learning:
 
 # Agent proxy settings
 agent_proxy:
-  max_turn: 10
-  max_actions_per_turn: 5
+  max_turn: 5
+  max_actions_per_turn: 2
 
 # ES Manager settings (will be overridden per task dynamically)
 es_manager:

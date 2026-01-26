@@ -86,6 +86,31 @@ class ActorRolloutRefWorker(VerlActorRolloutRefWorker):
         if hasattr(self, 'actor') and self.actor is not None:
             self.actor.set_cl_config(cl_config)
 
+    def get_lora_params(self):
+        """
+        Get LoRA parameters from the actor.
+        Delegates to the actor's get_lora_params method.
+        """
+        if hasattr(self, 'actor') and self.actor is not None:
+            return self.actor.get_lora_params()
+        return {}
+
+    def set_lora_params(self, lora_params):
+        """
+        Set LoRA parameters in the actor.
+        Delegates to the actor's set_lora_params method.
+        """
+        if hasattr(self, 'actor') and self.actor is not None:
+            self.actor.set_lora_params(lora_params)
+
+    def reinitialize_lora(self):
+        """
+        Reinitialize LoRA parameters in the actor.
+        Delegates to the actor's reinitialize_lora method.
+        """
+        if hasattr(self, 'actor') and self.actor is not None:
+            self.actor.reinitialize_lora()
+
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
     @DistProfiler.annotate(color="red", role="rollout_generate")
     def generate_sequences(self, prompts: DataProto):

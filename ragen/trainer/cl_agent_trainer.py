@@ -128,6 +128,25 @@ class ContinualLearningAgentTrainer(RayAgentTrainer):
             # Task checkpoints
             'task_checkpoints': self.cl_method_state.get('task_checkpoints', {}),
             'accumulated_rank': self.cl_method_state.get('accumulated_rank', 0),
+            # L2P specific
+            'pool_size': self.cl_method_state.get('pool_size',
+                                                  self.cl_method_config.get('pool_size', 10)),
+            'prompt_length': self.cl_method_state.get('prompt_length',
+                                                      self.cl_method_config.get('prompt_length', 10)),
+            'top_k': self.cl_method_state.get('top_k',
+                                              self.cl_method_config.get('top_k', 4)),
+            'embedding_key': self.cl_method_state.get('embedding_key',
+                                                      self.cl_method_config.get('embedding_key', 'mean')),
+            'prompt_init': self.cl_method_state.get('prompt_init',
+                                                    self.cl_method_config.get('prompt_init', 'uniform')),
+            'prompt_key': self.cl_method_state.get('prompt_key',
+                                                   self.cl_method_config.get('prompt_key', True)),
+            'prompt_key_init': self.cl_method_state.get('prompt_key_init',
+                                                        self.cl_method_config.get('prompt_key_init', 'uniform')),
+            'use_prompt_mask': self.cl_method_state.get('use_prompt_mask',
+                                                        self.cl_method_config.get('use_prompt_mask', False)),
+            'pull_constraint_coeff': self.cl_method_state.get('pull_constraint_coeff',
+                                                              self.cl_method_config.get('pull_constraint_coeff', 1.0)),
         }
 
         # Set config on all actor rollout workers
@@ -344,6 +363,7 @@ class ContinualLearningAgentTrainer(RayAgentTrainer):
             with marked_timer("step", timing_raw):
                 # Generate batch
                 with marked_timer("gen", timing_raw):
+                    batch.meta_info["current_task_idx"] = self.current_task_idx
                     batch = self.agent_proxy.rollout(batch, val=False)
                     batch, metrics = self.rollout_filter.filter(batch)
 
@@ -495,4 +515,3 @@ class ContinualLearningAgentTrainer(RayAgentTrainer):
 
             progress_bar.update(1)
             self.global_steps += 1
-

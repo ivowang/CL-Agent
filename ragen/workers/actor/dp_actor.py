@@ -17,6 +17,7 @@ Single Process Actor with Continual Learning Support
 
 import itertools
 import logging
+import math
 import os
 from typing import Tuple, Dict, Any, Optional
 
@@ -39,6 +40,7 @@ from peft import PeftModel
 
 # Import CL loss functions
 from ragen.cl_methods.loss_functions import compute_olora_loss, get_cl_loss_fn
+from ragen.cl_methods.l2p_prompt import prepare_l2p_inputs
 
 
 __all__ = ["DataParallelPPOActor"]
@@ -77,6 +79,12 @@ class DataParallelPPOActor(BasePPOActor):
         # HiDE-Prompt: Prompt-based continual learning
         self._hideprompt_enabled = False
         self._last_hidden_states: Optional[torch.Tensor] = None  # Store for feature extraction
+
+        # L2P: Prompt pool based continual learning
+        self._l2p_enabled = False
+        self._l2p_last_reduce_sim: Optional[torch.Tensor] = None
+        self._l2p_last_prompt_idx: Optional[torch.Tensor] = None
+        self._l2p_task_idx: int = 0
         
     def set_cl_config(self, cl_config: Dict[str, Any]) -> None:
         """
@@ -126,6 +134,28 @@ class DataParallelPPOActor(BasePPOActor):
             if rank == 0:
                 print(f"[CL Actor] HiDE-Prompt enabled: prompt_length={cl_config.get('prompt_length', 5)}, "
                       f"reg_weight={cl_config.get('reg_weight', 0.1)}")
+        else:
+            self._hideprompt_enabled = False
+
+        # Initialize L2P if needed
+        if self._cl_method_name == 'l2p':
+            self._l2p_enabled = True
+            self._l2p_task_idx = cl_config.get('current_task_idx', 0)
+            if rank == 0:
+                print("[CL Actor] L2P enabled: pool_size={}, prompt_length={}, top_k={}, "
+                      "embedding_key={}, use_prompt_mask={}".format(
+                          cl_config.get('pool_size', 10),
+                          cl_config.get('prompt_length', 10),
+                          cl_config.get('top_k', 4),
+                          cl_config.get('embedding_key', 'mean'),
+                          cl_config.get('use_prompt_mask', False),
+                      ))
+        else:
+            self._l2p_enabled = False
+
+        # Reset per-task L2P stats
+        self._l2p_last_reduce_sim = None
+        self._l2p_last_prompt_idx = None
 
         # Check if we need to reinitialize LoRA for new task (O-LoRA and SD-LoRA)
         current_task_idx = cl_config.get('current_task_idx', 0)
@@ -785,6 +815,39 @@ class DataParallelPPOActor(BasePPOActor):
 
         return contrastive_loss, metrics
 
+    def _get_l2p_prompt_pool(self) -> Optional[nn.Module]:
+        """Return the L2P prompt pool module if attached to the model."""
+        model = self.actor_module
+        if hasattr(model, "l2p_prompt_pool"):
+            return model.l2p_prompt_pool
+        if hasattr(model, "_fsdp_wrapped_module") and hasattr(model._fsdp_wrapped_module, "l2p_prompt_pool"):
+            return model._fsdp_wrapped_module.l2p_prompt_pool
+        return None
+
+    def _compute_l2p_pull_loss(self) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        Compute L2P pull constraint loss.
+
+        This encourages selected prompt keys to align with the input query.
+        """
+        device = torch.cuda.current_device()
+        pull_coeff = self._cl_config.get('pull_constraint_coeff', 1.0)
+
+        if self._l2p_last_reduce_sim is None:
+            return torch.tensor(0.0, device=device, requires_grad=False), {
+                'cl/l2p_pull_loss': 0.0,
+                'cl/l2p_reduce_sim': 0.0,
+                'cl/total_loss': 0.0,
+            }
+
+        l2p_loss = -pull_coeff * self._l2p_last_reduce_sim
+        metrics = {
+            'cl/l2p_pull_loss': l2p_loss.detach().item(),
+            'cl/l2p_reduce_sim': self._l2p_last_reduce_sim.detach().item(),
+            'cl/total_loss': l2p_loss.detach().item(),
+        }
+        return l2p_loss, metrics
+
     def _compute_cl_loss(self) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         Compute continual learning loss based on the configured method.
@@ -805,6 +868,8 @@ class DataParallelPPOActor(BasePPOActor):
         # HiDE-Prompt handling
         if self._cl_method_name == 'hideprompt':
             return self._compute_hideprompt_contrastive_loss()
+        if self._cl_method_name == 'l2p':
+            return self._compute_l2p_pull_loss()
 
         # Get all frozen LoRA params from all previous tasks (new multi-LoRA format)
         all_frozen_lora_params = self._cl_config.get('all_frozen_lora_params', {})
@@ -890,6 +955,8 @@ class DataParallelPPOActor(BasePPOActor):
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
 
             if self.use_remove_padding:
+                if self._l2p_enabled:
+                    raise NotImplementedError("L2P does not support use_remove_padding=True.")
                 input_ids_rmpad, indices, *_ = unpad_input(input_ids.unsqueeze(-1), attention_mask)  # input_ids_rmpad (total_nnz, ...)
                 input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
 
@@ -948,14 +1015,43 @@ class DataParallelPPOActor(BasePPOActor):
                 log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
 
             else:  # not using rmpad and no ulysses sp
-                output = self.actor_module(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    **multi_modal_inputs,
-                    use_cache=False,
-                    output_hidden_states=self._hideprompt_enabled and is_training,  # Request hidden states for HiDE-Prompt
-                )  # prevent model thinks we are generating
+                if self._l2p_enabled:
+                    prompt_pool = self._get_l2p_prompt_pool()
+                    if prompt_pool is None:
+                        raise RuntimeError("L2P prompt pool not found on the model.")
+                    if position_ids.dim() == 3:
+                        raise NotImplementedError("L2P does not support 3D position_ids yet.")
+
+                    inputs_embeds, attention_mask, position_ids, reduce_sim, prompt_idx = prepare_l2p_inputs(
+                        model=self.actor_module,
+                        prompt_pool=prompt_pool,
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        task_idx=self._l2p_task_idx,
+                        train=is_training,
+                    )
+                    self._l2p_last_reduce_sim = reduce_sim
+                    self._l2p_last_prompt_idx = prompt_idx
+
+                    output = self.actor_module(
+                        input_ids=None,
+                        inputs_embeds=inputs_embeds,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        **multi_modal_inputs,
+                        use_cache=False,
+                        output_hidden_states=self._hideprompt_enabled and is_training,
+                    )
+                else:
+                    output = self.actor_module(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        **multi_modal_inputs,
+                        use_cache=False,
+                        output_hidden_states=self._hideprompt_enabled and is_training,  # Request hidden states for HiDE-Prompt
+                    )  # prevent model thinks we are generating
 
                 # Store hidden states for HiDE-Prompt contrastive loss
                 if self._hideprompt_enabled and is_training and hasattr(output, 'hidden_states') and output.hidden_states is not None:
@@ -1216,3 +1312,121 @@ class DataParallelPPOActor(BasePPOActor):
             append_to_dict(metrics, data)
         self.actor_optimizer.zero_grad()
         return metrics
+
+    def get_lora_params(self) -> Dict[str, torch.Tensor]:
+        """
+        Extract current LoRA parameters from the model.
+
+        Returns:
+            Dictionary mapping module names to LoRA parameters (A and B matrices)
+        """
+        lora_params = {}
+
+        # Check if model is a PeftModel
+        if not isinstance(self.actor_module, PeftModel):
+            logger.warning("Model is not a PeftModel, cannot extract LoRA params")
+            return lora_params
+
+        # Get the base model (unwrap FSDP if needed)
+        model = self.actor_module
+        if isinstance(model, FSDP):
+            # For FSDP models, we need to use state_dict
+            with FSDP.state_dict_type(model, state_dict_type="full"):
+                state_dict = model.state_dict()
+
+            # Extract LoRA parameters from state dict
+            for key, value in state_dict.items():
+                if 'lora_A' in key or 'lora_B' in key:
+                    lora_params[key] = value.cpu().clone()
+        else:
+            # For non-FSDP models, directly access modules
+            for name, module in model.named_modules():
+                if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
+                    # Handle different PEFT versions
+                    if hasattr(module.lora_A, 'default'):
+                        lora_params[f"{name}.lora_A"] = module.lora_A.default.weight.data.cpu().clone()
+                        lora_params[f"{name}.lora_B"] = module.lora_B.default.weight.data.cpu().clone()
+                    else:
+                        lora_params[f"{name}.lora_A"] = module.lora_A.weight.data.cpu().clone()
+                        lora_params[f"{name}.lora_B"] = module.lora_B.weight.data.cpu().clone()
+
+        logger.info(f"Extracted {len(lora_params)} LoRA parameter tensors")
+        return lora_params
+
+    def set_lora_params(self, lora_params: Dict[str, torch.Tensor]) -> None:
+        """
+        Load LoRA parameters into the model.
+
+        Args:
+            lora_params: Dictionary mapping module names to LoRA parameters
+        """
+        if not lora_params:
+            logger.warning("No LoRA params provided to set")
+            return
+
+        # Check if model is a PeftModel
+        if not isinstance(self.actor_module, PeftModel):
+            logger.warning("Model is not a PeftModel, cannot set LoRA params")
+            return
+
+        model = self.actor_module
+        device = next(model.parameters()).device
+
+        if isinstance(model, FSDP):
+            # For FSDP models, we need to use load_state_dict
+            # Move params to correct device
+            lora_params_device = {k: v.to(device) for k, v in lora_params.items()}
+
+            with FSDP.state_dict_type(model, state_dict_type="full"):
+                # Get current state dict
+                current_state_dict = model.state_dict()
+
+                # Update only LoRA parameters
+                for key, value in lora_params_device.items():
+                    if key in current_state_dict:
+                        current_state_dict[key] = value
+
+                # Load updated state dict
+                model.load_state_dict(current_state_dict, strict=False)
+        else:
+            # For non-FSDP models, directly update modules
+            for name, module in model.named_modules():
+                if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
+                    lora_a_key = f"{name}.lora_A"
+                    lora_b_key = f"{name}.lora_B"
+
+                    if lora_a_key in lora_params and lora_b_key in lora_params:
+                        # Handle different PEFT versions
+                        if hasattr(module.lora_A, 'default'):
+                            module.lora_A.default.weight.data.copy_(lora_params[lora_a_key].to(device))
+                            module.lora_B.default.weight.data.copy_(lora_params[lora_b_key].to(device))
+                        else:
+                            module.lora_A.weight.data.copy_(lora_params[lora_a_key].to(device))
+                            module.lora_B.weight.data.copy_(lora_params[lora_b_key].to(device))
+
+        logger.info(f"Loaded {len(lora_params)} LoRA parameter tensors")
+
+    def reinitialize_lora(self) -> None:
+        """
+        Reinitialize LoRA parameters for a new task.
+        This is useful for methods like O-LoRA that want fresh LoRA params per task.
+        """
+        if not isinstance(self.actor_module, PeftModel):
+            logger.warning("Model is not a PeftModel, cannot reinitialize LoRA")
+            return
+
+        model = self.actor_module
+
+        # Reinitialize LoRA parameters
+        for name, module in model.named_modules():
+            if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
+                # Handle different PEFT versions
+                if hasattr(module.lora_A, 'default'):
+                    # Reset to initialization
+                    nn.init.kaiming_uniform_(module.lora_A.default.weight, a=math.sqrt(5))
+                    nn.init.zeros_(module.lora_B.default.weight)
+                else:
+                    nn.init.kaiming_uniform_(module.lora_A.weight, a=math.sqrt(5))
+                    nn.init.zeros_(module.lora_B.weight)
+
+        logger.info("Reinitialized LoRA parameters for new task")

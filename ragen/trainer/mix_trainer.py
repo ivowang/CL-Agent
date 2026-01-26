@@ -298,6 +298,11 @@ class MixAgentTrainer(RayAgentTrainer):
                     }
                     gen_batch = DataProto(batch=None, non_tensor_batch=None, meta_info=meta_info)
                     batch = self.agent_proxy.rollout(gen_batch, val=False)
+
+                    # Filter rollouts before training updates
+                    if self.rollout_filter is not None:
+                        batch, filter_metrics = self.rollout_filter.filter(batch)
+                        metrics.update(filter_metrics)
                     
                     # Log training metrics (now includes all environments)
                     if "metrics" in batch.meta_info:

@@ -81,12 +81,20 @@ Modified to support:
 ### Training Script
 
 ```bash
-# Basic usage
+# Basic usage (uses GPU 0 by default)
 bash run_continual_9tasks_hideprompt.sh
+
+# With custom GPU
+CUDA_VISIBLE_DEVICES=3 bash run_continual_9tasks_hideprompt.sh
 
 # With custom parameters
 REG_WEIGHT=0.1 PROMPT_LENGTH=5 TASK_ORDER=012345678 bash run_continual_9tasks_hideprompt.sh
+
+# Full example with all options
+CUDA_VISIBLE_DEVICES=3 REG_WEIGHT=0.15 PROMPT_LENGTH=8 TASK_ORDER=036147258 bash run_continual_9tasks_hideprompt.sh
 ```
+
+**Note**: The script automatically detects `CUDA_VISIBLE_DEVICES` and sets the correct number of GPUs in the configuration.
 
 ### Python API
 

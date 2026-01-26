@@ -1,8 +1,8 @@
-# 9-Task Mix Training Configuration
+# Mix Training Configuration (9-task pool)
 #
-# This config enables multi-task mixed training where the agent trains on ALL 9
-# environments SIMULTANEOUSLY in each batch. Each parallel sampling step includes
-# samples from all 9 environments mixed together.
+# This config enables multi-task mixed training where the agent trains on a
+# user-selected subset of the 9 environments simultaneously in each batch.
+# Each parallel sampling step includes samples from the selected environments.
 #
 # Environments:
 #   BanditLow, BanditMedium, BanditHard
@@ -10,10 +10,10 @@
 #   FrozenLakeLow, FrozenLakeMedium, FrozenLakeHard
 #
 # Key features:
-# - All 9 environments are mixed in each training batch
+# - Selected environments are mixed in each training batch
 # - Single shared LoRA module for all environments
 # - No sequential task ordering
-# - Each batch contains samples from all difficulty levels
+# - Each batch contains samples from the selected tasks/difficulties
 #
 # Checkpoint structure:
 #   checkpoints/mix_9tasks/{timestamp}/global_step_{N}/
@@ -24,7 +24,8 @@
 #   bash run_mix_9tasks.sh
 #
 # With custom parameters:
-#   TOTAL_STEPS=900 TEST_FREQ=10 bash run_mix_9tasks.sh
+#   TOTAL_STEPS=1200 TEST_FREQ=20 bash run_mix_9tasks.sh
+#   MIX_TASKS=BanditLow,BanditMedium,BanditHard bash run_mix_9tasks.sh
 
 defaults:
   - base
@@ -34,9 +35,9 @@ defaults:
 trainer:
   project_name: ragen_mix_training_9tasks
   experiment_name: mix_9tasks
-  total_training_steps: 1800  # Equivalent to 9 tasks × 200 steps
-  test_freq: 100  # Validate every 100 steps on all environments
-  save_freq: 200  # Save checkpoint every 200 steps
+  total_training_steps: 1200  # Adjust if using a smaller/larger task subset
+  test_freq: 20  # Validate every 20 steps on all environments
+  save_freq: 100  # Save checkpoint every 100 steps
   val_before_train: True
   generations_to_log_to_wandb:
     val: 20
@@ -50,6 +51,15 @@ trainer:
 mix_training:
   # Method name (for logging)
   method_name: mix_9tasks
+
+  # Task subset to mix in each training batch (defaults to Bandit difficulties)
+  # Available tasks: BanditLow, BanditMedium, BanditHard,
+  #                  SokobanLow, SokobanMedium, SokobanHard,
+  #                  FrozenLakeLow, FrozenLakeMedium, FrozenLakeHard
+  task_subset:
+    - BanditLow
+    - BanditMedium
+    - BanditHard
 
   # List of 9 environments to mix in each training batch
   # All environments are sampled simultaneously in each step
@@ -112,25 +122,25 @@ mix_training:
       val_tags: ["FrozenLakeHard"]
       val_n_groups: [32]
 
-  # Total per batch: 9 envs × 2 groups × 16 = 288 samples
+  # Total per batch depends on task_subset and n_groups (e.g., 3 envs × 2 groups).
 
 # Agent proxy settings
 agent_proxy:
-  max_turn: 10
-  max_actions_per_turn: 5
+  max_turn: 5
+  max_actions_per_turn: 2
 
-# ES Manager settings (initial placeholder, will be overridden to include all envs)
+# ES Manager settings (initial placeholder, overridden to match the selected subset)
 # The actual mixed config is built dynamically in mix_trainer.py
 es_manager:
   train:
-    env_groups: 18              # Total: 9 envs × 2 = 18 groups for mixed training
-    group_size: 16
+    env_groups: 18              # Placeholder; overridden based on task_subset
+    group_size: 8
     env_configs:
       tags: ["BanditLow", "BanditMedium", "BanditHard", "SokobanLow", "SokobanMedium", "SokobanHard", "FrozenLakeLow", "FrozenLakeMedium", "FrozenLakeHard"]
       n_groups: [2, 2, 2, 2, 2, 2, 2, 2, 2]
   val:
     env_groups: 32
-    group_size: 16
+    group_size: 8
     env_configs:
       tags: ["BanditLowVal"]    # Validation done separately per env
       n_groups: [32]

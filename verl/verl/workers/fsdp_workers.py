@@ -380,6 +380,38 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 trust_remote_code=trust_remote_code,
             )
 
+            # L2P prompt pool injection (before FSDP wrapping)
+            l2p_config = self.config.model.get("l2p", None)
+            l2p_enabled = bool(l2p_config and l2p_config.get("enable", False))
+            if l2p_enabled:
+                from ragen.cl_methods.l2p_prompt import L2PPromptPool, L2PPromptPoolConfig, get_input_embedding_layer
+
+                if self._is_lora and self.rank == 0:
+                    print("[L2P] Warning: LoRA is enabled while L2P is requested. "
+                          "Set actor_rollout_ref.model.lora_rank=0 for pure L2P.")
+
+                embed_layer = get_input_embedding_layer(actor_module)
+                embed_dim = embed_layer.weight.shape[1]
+                pool_cfg = L2PPromptPoolConfig(
+                    pool_size=l2p_config.get("pool_size", 10),
+                    prompt_length=l2p_config.get("prompt_length", 10),
+                    top_k=l2p_config.get("top_k", 4),
+                    embedding_key=l2p_config.get("embedding_key", "mean"),
+                    prompt_init=l2p_config.get("prompt_init", "uniform"),
+                    prompt_key=l2p_config.get("prompt_key", True),
+                    prompt_key_init=l2p_config.get("prompt_key_init", "uniform"),
+                    use_prompt_mask=l2p_config.get("use_prompt_mask", False),
+                )
+                actor_module.l2p_prompt_pool = L2PPromptPool(pool_cfg, embed_dim=embed_dim)
+                actor_module.l2p_config = pool_cfg
+
+                # Freeze backbone, only train prompts
+                if role == "actor":
+                    for param in actor_module.parameters():
+                        param.requires_grad = False
+                    for param in actor_module.l2p_prompt_pool.parameters():
+                        param.requires_grad = True
+
             # Apply Liger kernel to the model if use_liger is set to True
             if use_liger:
                 from liger_kernel.transformers.monkey_patch import _apply_liger_kernel_to_instance
@@ -418,7 +450,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 }
                 actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
 
+        fsdp_strategy = fsdp_config.get("strategy", "fsdp")
         self.use_orig_params = fsdp_config.get("use_orig_params", False)
+        # L2P freezes backbone params, which requires orig params in FSDP1.
+        if l2p_enabled and role == "actor" and fsdp_strategy == "fsdp":
+            self.use_orig_params = True
         if self.config.actor.get("freeze_vision_tower", False):
             vision_tower = get_vl_model_vision_tower(actor_module)
             if vision_tower is not None:
@@ -597,9 +633,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 4. build rollout model
         log_gpu_memory_usage(f"Before building {self.config.rollout.name} rollout", logger=logger)
-        self.rollout = get_rollout_class(rollout_config.name, rollout_config.mode)(
-            config=rollout_config, model_config=model_config, device_mesh=rollout_device_mesh
-        )
+        if rollout_name == "hf":
+            from verl.workers.rollout.hf_rollout import HFRollout
+
+            self.rollout = HFRollout(
+                module=self.actor_module_fsdp,
+                config=rollout_config,
+                model_config=model_config,
+                device_mesh=rollout_device_mesh,
+            )
+        else:
+            self.rollout = get_rollout_class(rollout_config.name, rollout_config.mode)(
+                config=rollout_config, model_config=model_config, device_mesh=rollout_device_mesh
+            )
         log_gpu_memory_usage(f"After building {self.config.rollout.name} rollout", logger=logger)
 
         # Full params

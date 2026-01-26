@@ -24,6 +24,9 @@ prompt_length: ${oc.select:data.max_prompt_length,512}
 # same as data.max_response_length if it exists
 response_length: ${oc.select:data.max_response_length,512}
 
+# For HF rollout, split generation into micro batches to reduce peak memory.
+micro_batch_size: null
+
 # for vllm rollout
 # Rollout model parameters type. Align with actor model's FSDP/Megatron type.
 dtype: bfloat16

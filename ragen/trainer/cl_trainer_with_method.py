@@ -36,6 +36,7 @@ from ragen.llm_agent.es_manager import EnvStateManager
 from ragen.cl_methods import get_cl_method, BaseCLMethod
 from ragen.cl_methods.base import CLMethodConfig
 from ragen.cl_methods.olora import OLoRAConfig
+from ragen.cl_methods.l2p import L2PConfig
 
 
 class CLTrainerWithMethod(ContinualLearningAgentTrainer):
@@ -67,6 +68,21 @@ class CLTrainerWithMethod(ContinualLearningAgentTrainer):
                 lambda_ortho=self.cl_method_config.get('lambda_ortho', 0.5),
                 lambda_l2=self.cl_method_config.get('lambda_l2', 0.0),
                 lora_rank_per_task=self.cl_method_config.get('lora_rank', 64),
+                checkpoint_base_dir=self.config.trainer.default_local_dir,
+            )
+        elif method_name == 'l2p':
+            config = L2PConfig(
+                name='l2p',
+                current_task_idx=self.current_task_idx,
+                pool_size=self.cl_method_config.get('pool_size', 10),
+                prompt_length=self.cl_method_config.get('prompt_length', 10),
+                top_k=self.cl_method_config.get('top_k', 4),
+                embedding_key=self.cl_method_config.get('embedding_key', 'mean'),
+                prompt_init=self.cl_method_config.get('prompt_init', 'uniform'),
+                prompt_key=self.cl_method_config.get('prompt_key', True),
+                prompt_key_init=self.cl_method_config.get('prompt_key_init', 'uniform'),
+                use_prompt_mask=self.cl_method_config.get('use_prompt_mask', False),
+                pull_constraint_coeff=self.cl_method_config.get('pull_constraint_coeff', 1.0),
                 checkpoint_base_dir=self.config.trainer.default_local_dir,
             )
         else:
@@ -326,4 +342,3 @@ class CLTrainerWithMethod(ContinualLearningAgentTrainer):
 
             progress_bar.update(1)
             self.global_steps += 1
-

@@ -33,9 +33,9 @@ defaults:
 trainer:
   project_name: ragen_continual_learning_9tasks
   experiment_name: cl_baseline_9tasks
-  total_training_steps: 200  # Will be overridden per task
+  total_training_steps: 900  # Will be overridden per task
   test_freq: 20  # Validate every 100 steps on all seen tasks
-  save_freq: 200  # Save checkpoint at end of each task
+  save_freq: 300  # Save checkpoint at end of each task
   val_before_train: True
   generations_to_log_to_wandb:
     val: 20
@@ -54,7 +54,7 @@ continual_learning:
   checkpoint_base_dir: checkpoints
 
   # Number of training steps per task
-  steps_per_task: 100
+  steps_per_task: 300
 
   # Resume from checkpoint (optional)
   resume_checkpoint: null
@@ -141,8 +141,8 @@ continual_learning:
 
 # Agent proxy settings
 agent_proxy:
-  max_turn: 10
-  max_actions_per_turn: 5
+  max_turn: 5
+  max_actions_per_turn: 2
 
 # ES Manager settings (will be overridden per task dynamically)
 es_manager:

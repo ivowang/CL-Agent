@@ -1,39 +1,38 @@
-# 9-Task SD-LoRA Continual Learning Configuration
+# 9-Task L2P Continual Learning Configuration
 #
-# This config enables sequential training using SD-LoRA (Scalable Decomposed Low-Rank Adaptation)
-# on 9 tasks (3 environments × 3 difficulty levels), learning each task with separate LoRA adapters
-# and using learnable scaling factors to combine them during inference.
+# This config enables sequential training using L2P (Learning to Prompt)
+# on 9 tasks (3 environments × 3 difficulty levels), using a prompt pool
+# with instance-wise selection and a pull constraint loss.
 #
 # Task Index Mapping:
 #   0=BanditLow, 1=BanditMedium, 2=BanditHard
 #   3=SokobanLow, 4=SokobanMedium, 5=SokobanHard
 #   6=FrozenLakeLow, 7=FrozenLakeMedium, 8=FrozenLakeHard
 #
-# Predefined Task Orderings:
-#   Order 1: "012345678" - Env-first, LMH: BL→BM→BH→SL→SM→SH→FL→FM→FH
-#   Order 2: "210543876" - Env-first, HML: BH→BM→BL→SH→SM→SL→FH→FM→FL
-#   Order 3: "036147258" - Difficulty-first, LMH: BL→SL→FL→BM→SM→FM→BH→SH→FH
-#   Order 4: "258147036" - Difficulty-first, HML: BH→SH→FH→BM→SM→FM→BL→SL→FL
-#
 # Checkpoint structure:
-#   checkpoints/sdlora_9tasks/{timestamp}/global_step_{N}/
+#   checkpoints/l2p_9tasks/{timestamp}/global_step_{N}/
 #
 # Usage:
-#   python train_continual.py --config-name continual_learning_9tasks_sdlora
+#   python train_continual.py --config-name continual_learning_9tasks_l2p
 #   or
-#   bash run_continual_9tasks_sdlora.sh
-#
-# With custom parameters:
-#   SCALING_FACTOR_INIT=0.5 bash run_continual_9tasks_sdlora.sh
+#   bash run_continual_9tasks_l2p.sh
 
 defaults:
   - base
   - _self_
 
-# Override base settings for SD-LoRA continual learning
+# System settings
+system:
+  CUDA_VISIBLE_DEVICES: "0"  # Single GPU for L2P
+
+# Training batch sizing (increase GPU utilization for HF rollout)
+micro_batch_size_per_gpu: 8
+
+# Override base settings for L2P continual learning
 trainer:
   project_name: ragen_continual_learning_9tasks
-  experiment_name: cl_sdlora_9tasks
+  experiment_name: cl_l2p_9tasks
+  n_gpus_per_node: 1  # Single GPU
   total_training_steps: 900  # Will be overridden per task
   test_freq: 20  # Validate every 20 steps on all seen tasks
   save_freq: 100  # Save checkpoint at end of each task
@@ -45,9 +44,29 @@ trainer:
   max_critic_ckpt_to_keep: 9
   resume_mode: disable
 
+# Use HF rollout to support prompt injection
+actor_rollout_ref:
+  rollout:
+    name: hf
+    micro_batch_size: 32
+  model:
+    lora_rank: 0
+    lora_alpha: 1
+    enable_gradient_checkpointing: false
+    l2p:
+      enable: true
+      pool_size: ${continual_learning.method.pool_size}
+      prompt_length: ${continual_learning.method.prompt_length}
+      top_k: ${continual_learning.method.top_k}
+      embedding_key: ${continual_learning.method.embedding_key}
+      prompt_init: ${continual_learning.method.prompt_init}
+      prompt_key: ${continual_learning.method.prompt_key}
+      prompt_key_init: ${continual_learning.method.prompt_key_init}
+      use_prompt_mask: ${continual_learning.method.use_prompt_mask}
+
 # Continual Learning specific settings
 continual_learning:
-  experiment_name: cl_sdlora_9tasks
+  experiment_name: cl_l2p_9tasks
 
   # Base directory for checkpoints
   checkpoint_base_dir: checkpoints
@@ -62,11 +81,16 @@ continual_learning:
 
   # CL Method configuration
   method:
-    name: sdlora
-    # SD-LoRA specific parameters
-    scaling_factor_init: 0.8  # Initial value for scaling factors
-    normalize_lora: true      # Whether to normalize LoRA outputs by weight norms
-    lora_rank: 64             # LoRA rank per task
+    name: l2p
+    pool_size: 36
+    prompt_length: 10
+    top_k: 4
+    embedding_key: mean  # mean | max | mean_max | cls
+    prompt_init: uniform
+    prompt_key: true
+    prompt_key_init: uniform
+    use_prompt_mask: true
+    pull_constraint_coeff: 1.0
 
   # 9 Tasks: 3 environments × 3 difficulty levels
   tasks:
@@ -148,17 +172,3 @@ es_manager:
       n_groups: [8]
   val:
     env_groups: 32
-    group_size: 16
-    env_configs:
-      tags: ["BanditLowVal"]
-      n_groups: [32]
-
-# Rollout settings
-actor_rollout_ref:
-  rollout:
-    response_length: 500
-    # Lower GPU memory utilization to avoid conflicts with CL computation
-    gpu_memory_utilization: 0.4
-    val_kwargs:
-      do_sample: True
-      temperature: 0.5

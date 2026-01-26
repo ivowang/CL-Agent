@@ -1,0 +1,137 @@
+# 9-Task MoE (Mixture of Experts) Training Configuration
+#
+# This config enables MoE training where each task has its own independent
+# LoRA module (expert). Training uses mixed sampling (all tasks in each step)
+# but maintains complete task independence.
+#
+# Key features:
+# - 9 independent LoRA modules (one per task)
+# - 9 independent actor-critic pairs
+# - Serial sampling: sample from each task sequentially
+# - Serial updates: update each task's LoRA sequentially
+#
+# Checkpoint structure:
+#   checkpoints/moe_9tasks/{timestamp}/global_step_{N}/task_{i}/
+#
+# Usage:
+#   python train_moe.py --config-name moe_training_9tasks
+#   or
+#   bash run_moe_9tasks.sh
+
+defaults:
+  - base
+  - _self_
+
+# System settings
+system:
+  CUDA_VISIBLE_DEVICES: "0"  # Single GPU for MoE
+
+# Override base settings for MoE training
+trainer:
+  project_name: ragen_moe_training_9tasks
+  experiment_name: moe_9tasks
+  n_gpus_per_node: 1  # Single GPU
+  total_training_steps: 900  # 100 steps per task equivalent
+  test_freq: 20  # Validate every 20 steps on all tasks
+  save_freq: 100  # Save checkpoint every 100 steps
+  val_before_train: True
+  generations_to_log_to_wandb:
+    val: 20
+  logger: ['console', 'wandb']
+  max_actor_ckpt_to_keep: 5
+  max_critic_ckpt_to_keep: 5
+  resume_mode: disable
+  default_local_dir: checkpoints/moe_9tasks
+
+# MoE training specific settings
+moe_training:
+  # Method name (for logging)
+  method_name: moe_9tasks
+
+  # List of 9 tasks, each with independent LoRA
+  tasks:
+    # Bandit environments (3 difficulty levels)
+    - name: bandit_low
+      train_tags: ["BanditLow"]
+      train_n_groups: [8]
+      val_tags: ["BanditLowVal"]
+      val_n_groups: [32]
+
+    - name: bandit_medium
+      train_tags: ["BanditMedium"]
+      train_n_groups: [8]
+      val_tags: ["BanditMediumVal"]
+      val_n_groups: [32]
+
+    - name: bandit_hard
+      train_tags: ["BanditHard"]
+      train_n_groups: [8]
+      val_tags: ["BanditHardVal"]
+      val_n_groups: [32]
+
+    # Sokoban environments (3 difficulty levels)
+    - name: sokoban_low
+      train_tags: ["SokobanLow"]
+      train_n_groups: [8]
+      val_tags: ["SokobanLow"]
+      val_n_groups: [32]
+
+    - name: sokoban_medium
+      train_tags: ["SokobanMedium"]
+      train_n_groups: [8]
+      val_tags: ["SokobanMedium"]
+      val_n_groups: [32]
+
+    - name: sokoban_hard
+      train_tags: ["SokobanHard"]
+      train_n_groups: [8]
+      val_tags: ["SokobanHard"]
+      val_n_groups: [32]
+
+    # Frozen Lake environments (3 difficulty levels)
+    - name: frozen_lake_low
+      train_tags: ["FrozenLakeLow"]
+      train_n_groups: [8]
+      val_tags: ["FrozenLakeLow"]
+      val_n_groups: [32]
+
+    - name: frozen_lake_medium
+      train_tags: ["FrozenLakeMedium"]
+      train_n_groups: [8]
+      val_tags: ["FrozenLakeMedium"]
+      val_n_groups: [32]
+
+    - name: frozen_lake_hard
+      train_tags: ["FrozenLakeHard"]
+      train_n_groups: [8]
+      val_tags: ["FrozenLakeHard"]
+      val_n_groups: [32]
+
+# Agent proxy settings
+agent_proxy:
+  max_turn: 5
+  max_actions_per_turn: 2
+
+# ES Manager settings (placeholder, will be set per task)
+es_manager:
+  train:
+    env_groups: 8
+    group_size: 16
+    env_configs:
+      tags: ["BanditLow"]
+      n_groups: [8]
+  val:
+    env_groups: 32
+    group_size: 16
+    env_configs:
+      tags: ["BanditLowVal"]
+      n_groups: [32]
+
+# Rollout settings
+actor_rollout_ref:
+  rollout:
+    response_length: 500
+    gpu_memory_utilization: 0.4  # Lower for serial updates
+    val_kwargs:
+      do_sample: True
+      temperature: 0.5

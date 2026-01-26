@@ -19,6 +19,7 @@ to perform generation.
 """
 
 import contextlib
+import math
 
 import torch
 import torch.distributed
@@ -32,19 +33,35 @@ from verl.utils.device import get_device_name, get_torch_device
 from verl.utils.torch_functional import get_response_mask
 
 from .base import BaseRollout
+from ragen.cl_methods.l2p_prompt import prepare_l2p_inputs
 
 __all__ = ["HFRollout"]
 
 
 class HFRollout(BaseRollout):
-    def __init__(self, module: nn.Module, config):
-        super().__init__()
-        self.config = config
+    def __init__(self, module: nn.Module, config, model_config=None, device_mesh=None):
+        super().__init__(config=config, model_config=model_config, device_mesh=device_mesh)
         self.module = module
+
+    async def resume(self, tags: list[str]):
+        return
+
+    async def update_weights(self, weights, **kwargs):
+        # HF rollout shares the actor module in this backend; no weight sync needed.
+        for _ in weights:
+            pass
+        return
+
+    async def release(self):
+        return
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         batch_size = prompts.batch.batch_size[0]
-        num_chunks = max(batch_size // self.config.get("micro_batch_size", batch_size), 1)
+        micro_batch_size = self.config.get("micro_batch_size", None)
+        if micro_batch_size is None or micro_batch_size <= 0:
+            num_chunks = 1
+        else:
+            num_chunks = max(math.ceil(batch_size / micro_batch_size), 1)
         batch_prompts = prompts.chunk(chunks=num_chunks)
         output = [self._generate_minibatch(p) for p in batch_prompts]
         output = DataProto.concat(output)
@@ -98,6 +115,13 @@ class HFRollout(BaseRollout):
         attention_mask = prompts.batch["attention_mask"]  # left-padded attention_mask
         position_ids = prompts.batch["position_ids"]
 
+        orig_idx = idx
+        orig_attention_mask = attention_mask
+        orig_position_ids = position_ids
+        orig_prompt_length = prompt_length
+        l2p_prompt_len = 0
+        pad_lens = None
+
         # used to construct attention_mask
         eos_token_id = prompts.meta_info["eos_token_id"]
         pad_token_id = prompts.meta_info["pad_token_id"]
@@ -109,22 +133,85 @@ class HFRollout(BaseRollout):
             # recurse need to set to False according to https://github.com/pytorch/pytorch/issues/100069
             param_ctx = FSDP.summon_full_params(self.module, writeback=False, recurse=False)
         with param_ctx, torch.autocast(device_type=get_device_name(), dtype=torch.bfloat16):
-            output = self.module.generate(
-                input_ids=idx,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                do_sample=do_sample,
-                max_new_tokens=response_length,
-                eos_token_id=eos_token_id,
-                pad_token_id=pad_token_id,
-                generation_config=generation_config,
-                output_scores=False,  # this is potentially very large
-                return_dict_in_generate=True,
-                use_cache=True,
-            )
+            if hasattr(self.module, "l2p_prompt_pool") or (
+                hasattr(self.module, "_fsdp_wrapped_module")
+                and hasattr(self.module._fsdp_wrapped_module, "l2p_prompt_pool")
+            ):
+                prompt_pool = (
+                    self.module.l2p_prompt_pool
+                    if hasattr(self.module, "l2p_prompt_pool")
+                    else self.module._fsdp_wrapped_module.l2p_prompt_pool
+                )
+                pad_lens = (attention_mask == 0).sum(dim=1)
+                l2p_prompt_len = prompt_pool.config.prompt_length * min(
+                    prompt_pool.config.top_k, prompt_pool.config.pool_size
+                )
+
+                inputs_embeds, attention_mask, position_ids, _, _ = prepare_l2p_inputs(
+                    model=self.module,
+                    prompt_pool=prompt_pool,
+                    input_ids=idx,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    task_idx=prompts.meta_info.get("current_task_idx", 0),
+                    train=not is_validate,
+                )
+                # Build input_ids with prompt slots so sequence length matches inputs_embeds.
+                if l2p_prompt_len > 0:
+                    idx_with_prompts = idx.new_full(
+                        (idx.size(0), idx.size(1) + l2p_prompt_len),
+                        fill_value=pad_token_id,
+                    )
+                    for i in range(idx.size(0)):
+                        pad_len = int(pad_lens[i].item())
+                        if pad_len > 0:
+                            idx_with_prompts[i, :pad_len] = idx[i, :pad_len]
+                        idx_with_prompts[i, pad_len + l2p_prompt_len :] = idx[i, pad_len:]
+                    idx = idx_with_prompts
+
+                output = self.module.generate(
+                    input_ids=idx,
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    do_sample=do_sample,
+                    max_new_tokens=response_length,
+                    eos_token_id=eos_token_id,
+                    pad_token_id=pad_token_id,
+                    generation_config=generation_config,
+                    output_scores=False,  # this is potentially very large
+                    return_dict_in_generate=True,
+                    use_cache=True,
+                )
+            else:
+                output = self.module.generate(
+                    input_ids=idx,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    do_sample=do_sample,
+                    max_new_tokens=response_length,
+                    eos_token_id=eos_token_id,
+                    pad_token_id=pad_token_id,
+                    generation_config=generation_config,
+                    output_scores=False,  # this is potentially very large
+                    return_dict_in_generate=True,
+                    use_cache=True,
+                )
 
         # TODO: filter out the seq with no answers like ds-chat
         seq = output.sequences
+        if l2p_prompt_len > 0 and pad_lens is not None:
+            seq_no_prompt = seq.new_empty((seq.size(0), seq.size(1) - l2p_prompt_len))
+            for i in range(seq.size(0)):
+                pad_len = int(pad_lens[i].item())
+                seq_no_prompt[i] = torch.cat(
+                    [seq[i, :pad_len], seq[i, pad_len + l2p_prompt_len :]], dim=0
+                )
+            seq = seq_no_prompt
+            idx = orig_idx
+            attention_mask = orig_attention_mask
+            position_ids = orig_position_ids
+            prompt_length = orig_prompt_length
         generated_batch_size = seq.size(0)  # bs * num_return_sequences
 
         # huggingface generate will stop generating when all the batch reaches [EOS].

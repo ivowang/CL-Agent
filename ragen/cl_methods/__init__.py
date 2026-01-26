@@ -13,6 +13,7 @@ Available methods:
 - olora: Orthogonal Low-Rank Adaptation (O-LoRA) - per-task LoRA with orthogonal constraints
 - sdlora: Scalable Decomposed Low-Rank Adaptation (SD-LoRA) - per-task LoRA with scaling factors
 - hideprompt: HiDE-Prompt - prompt-based continual learning with contrastive regularization
+- moe: Mixture of Experts - independent LoRA per task with mixed sampling
 - mix: Multi-task interleaved training (all tasks simultaneously)
 """
 
@@ -22,6 +23,8 @@ from .naive import NaiveCLMethod
 from .olora import OLoRACLMethod
 from .sdlora import SDLoRACLMethod
 from .hideprompt import HiDEPromptCLMethod
+from .l2p import L2PCLMethod
+from .moe import MoECLMethod
 from .mix import MixCLMethod
 from .multi_lora import (
     MultiLoRAManager,
@@ -47,6 +50,8 @@ __all__ = [
     'OLoRACLMethod',
     'SDLoRACLMethod',
     'HiDEPromptCLMethod',
+    'L2PCLMethod',
+    'MoECLMethod',
     'MixCLMethod',
     # Multi-LoRA management
     'MultiLoRAManager',

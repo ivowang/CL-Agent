@@ -1,0 +1,9 @@
+ENV_TAG=BanditLow bash run_er_9tasks.sh && \
+ENV_TAG=BanditMedium bash run_er_9tasks.sh && \
+ENV_TAG=BanditHard bash run_er_9tasks.sh && \
+ENV_TAG=SokobanLow bash run_er_9tasks.sh && \
+ENV_TAG=SokobanMedium bash run_er_9tasks.sh && \
+ENV_TAG=SokobanHard bash run_er_9tasks.sh && \
+ENV_TAG=FrozenLakeLow bash run_er_9tasks.sh && \
+ENV_TAG=FrozenLakeMedium bash run_er_9tasks.sh && \
+ENV_TAG=FrozenLakeHard bash run_er_9tasks.sh

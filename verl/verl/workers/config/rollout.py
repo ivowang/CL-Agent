@@ -110,6 +110,7 @@ class RolloutConfig(BaseConfig):
 
     prompt_length: int = 512
     response_length: int = 512
+    micro_batch_size: Optional[int] = None
 
     dtype: str = "bfloat16"
     gpu_memory_utilization: float = 0.5

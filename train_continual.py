@@ -24,6 +24,14 @@ Or use the shell scripts:
     bash run_continual_olora.sh  # O-LoRA
 """
 
+import os
+import sys
+
+# Ensure local verl package is used (not an external installation).
+_LOCAL_VERL_PATH = os.path.join(os.path.dirname(__file__), "verl")
+if os.path.isdir(os.path.join(_LOCAL_VERL_PATH, "verl")) and _LOCAL_VERL_PATH not in sys.path:
+    sys.path.insert(0, _LOCAL_VERL_PATH)
+
 import ray
 import hydra
 import os
@@ -46,6 +54,7 @@ from ragen.cl_methods.base import CLMethodConfig
 from ragen.cl_methods.olora import OLoRAConfig, OLoRACLMethod
 from ragen.cl_methods.sdlora import SDLoRAConfig, SDLoRACLMethod
 from ragen.cl_methods.naive import NaiveCLConfig, NaiveCLMethod
+from ragen.cl_methods.l2p import L2PConfig, L2PCLMethod
 
 
 class DummyRewardManager():
@@ -220,6 +229,22 @@ def init_cl_method(cl_method_config, task_idx, config, cl_method_state=None):
             checkpoint_base_dir=config.trainer.default_local_dir,
         )
         method = SDLoRACLMethod(method_cfg)
+    elif method_name == 'l2p':
+        method_cfg = L2PConfig(
+            name='l2p',
+            current_task_idx=task_idx,
+            pool_size=cl_method_config.get('pool_size', 10),
+            prompt_length=cl_method_config.get('prompt_length', 10),
+            top_k=cl_method_config.get('top_k', 4),
+            embedding_key=cl_method_config.get('embedding_key', 'mean'),
+            prompt_init=cl_method_config.get('prompt_init', 'uniform'),
+            prompt_key=cl_method_config.get('prompt_key', True),
+            prompt_key_init=cl_method_config.get('prompt_key_init', 'uniform'),
+            use_prompt_mask=cl_method_config.get('use_prompt_mask', False),
+            pull_constraint_coeff=cl_method_config.get('pull_constraint_coeff', 1.0),
+            checkpoint_base_dir=config.trainer.default_local_dir,
+        )
+        method = L2PCLMethod(method_cfg)
     else:
         method_cfg = NaiveCLConfig(
             name='baseline',
