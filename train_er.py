@@ -35,46 +35,43 @@ register_resolvers()
 
 def add_dependency_and_validate_config(config):
     """Validate and add dependencies to config."""
-    assert config.micro_batch_size_per_gpu * config.trainer.n_gpus_per_node <= config.actor_rollout_ref.actor.ppo_mini_batch_size
-    assert config.actor_rollout_ref.actor.ppo_mini_batch_size % (config.micro_batch_size_per_gpu * config.trainer.n_gpus_per_node) == 0
     assert "qwen" in config.model_path.lower() or (not config.enable_response_mask)
     assert len(str(config.system.CUDA_VISIBLE_DEVICES).split(',')) == config.trainer.n_gpus_per_node
-    
     config.data.train_batch_size = config.es_manager.train.env_groups * config.es_manager.train.group_size
     return config
 
 
+def _find_mix_env_config(config, env_tag: str):
+    if not hasattr(config, "mix_training"):
+        raise ValueError("mix_training config not found; ensure experience_replay.yaml defaults to mix_training_9tasks")
+    for env_cfg in config.mix_training.environments:
+        if env_tag in list(env_cfg.train_tags):
+            return env_cfg
+    raise ValueError(f"Unknown env_tag '{env_tag}'. Not found in mix_training.environments.")
+
+
 def setup_env_config(config, env_tag: str):
-    """
-    Setup environment configuration based on env_tag.
-    
-    Args:
-        config: The configuration object
-        env_tag: Environment tag (e.g., "Bandit", "CoordSokoban", "CoordFrozenLake")
-    """
+    """Setup environment configuration based on mix_training_9tasks benchmark settings."""
+    env_cfg = _find_mix_env_config(config, env_tag)
     with open_dict(config):
         # Set n_gpus_per_node based on CUDA_VISIBLE_DEVICES
         n_gpus = len(str(config.system.CUDA_VISIBLE_DEVICES).split(','))
         config.trainer.n_gpus_per_node = n_gpus
-        
-        # Adjust batch sizes based on GPU count
-        # Ensure ppo_mini_batch_size is divisible by (micro_batch_size * n_gpus)
-        micro_batch = config.micro_batch_size_per_gpu
-        if config.actor_rollout_ref.actor.ppo_mini_batch_size < micro_batch * n_gpus:
-            config.actor_rollout_ref.actor.ppo_mini_batch_size = micro_batch * n_gpus
-        
-        # Set train environment
-        config.es_manager.train.env_configs.tags = [env_tag]
-        config.es_manager.train.env_configs.n_groups = [config.es_manager.train.env_groups]
-        
-        # Set validation environment
-        config.es_manager.val.env_configs.tags = [env_tag]
-        config.es_manager.val.env_configs.n_groups = [config.es_manager.val.env_groups]
-        
+
+        # Train environment (match Mix Training groups)
+        config.es_manager.train.env_configs.tags = list(env_cfg.train_tags)
+        config.es_manager.train.env_configs.n_groups = list(env_cfg.train_n_groups)
+        config.es_manager.train.env_groups = sum(env_cfg.train_n_groups)
+
+        # Validation environment (match Mix Training tags/groups)
+        config.es_manager.val.env_configs.tags = list(env_cfg.val_tags)
+        config.es_manager.val.env_configs.n_groups = list(env_cfg.val_n_groups)
+        config.es_manager.val.env_groups = sum(env_cfg.val_n_groups)
+
         # Update experiment name
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         config.trainer.experiment_name = f"er_{env_tag}_{timestamp}"
-    
+
     return config
 
 
@@ -107,8 +104,6 @@ def main(config):
     print("=" * 60)
     print(f"Environment: {env_tag}")
     print(f"Buffer size (N): {er_config_dict.buffer_size}")
-    print(f"Validation frequency (M): {er_config_dict.val_frequency}")
-    print(f"Max examples in prompt: {er_config_dict.max_examples_in_prompt}")
     print("=" * 60)
     
     # Setup environment
@@ -185,10 +180,7 @@ def main(config):
     # Create ER config
     er_config = ERConfig(
         buffer_size=er_config_dict.buffer_size,
-        val_frequency=er_config_dict.val_frequency,
         env_tag=env_tag,
-        max_examples_in_prompt=er_config_dict.max_examples_in_prompt,
-        example_selection=er_config_dict.get('example_selection', 'random'),
         output_dir=er_config_dict.output_dir,
     )
     

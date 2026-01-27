@@ -21,7 +21,7 @@
 #   bash launch_er.sh 0 BanditLow 1 SokobanLow 2 FrozenLakeLow
 #
 # With custom parameters:
-#   BUFFER_SIZE=30 VAL_FREQ=10 bash launch_er.sh 0 BanditLow
+#   BUFFER_SIZE=30 bash launch_er.sh 0 BanditLow
 #
 
 set -e
@@ -30,9 +30,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Optional parameters passed through environment
 BUFFER_SIZE="${BUFFER_SIZE:-}"
-VAL_FREQ="${VAL_FREQ:-}"
-MAX_EXAMPLES="${MAX_EXAMPLES:-}"
-EXAMPLE_SELECTION="${EXAMPLE_SELECTION:-}"
 
 # Valid environments
 VALID_ENVS="BanditLow BanditMedium BanditHard SokobanLow SokobanMedium SokobanHard FrozenLakeLow FrozenLakeMedium FrozenLakeHard"
@@ -53,17 +50,11 @@ echo "=============================================================="
 echo "Launching Experience Replay Training"
 echo "=============================================================="
 if [ -n "$BUFFER_SIZE" ]; then echo "Buffer size: $BUFFER_SIZE"; fi
-if [ -n "$VAL_FREQ" ]; then echo "Validation frequency: $VAL_FREQ"; fi
-if [ -n "$MAX_EXAMPLES" ]; then echo "Max examples: $MAX_EXAMPLES"; fi
-if [ -n "$EXAMPLE_SELECTION" ]; then echo "Example selection: $EXAMPLE_SELECTION"; fi
 echo ""
 
 # Build extra args
 EXTRA_ARGS=""
 if [ -n "$BUFFER_SIZE" ]; then EXTRA_ARGS="$EXTRA_ARGS BUFFER_SIZE=$BUFFER_SIZE"; fi
-if [ -n "$VAL_FREQ" ]; then EXTRA_ARGS="$EXTRA_ARGS VAL_FREQ=$VAL_FREQ"; fi
-if [ -n "$MAX_EXAMPLES" ]; then EXTRA_ARGS="$EXTRA_ARGS MAX_EXAMPLES=$MAX_EXAMPLES"; fi
-if [ -n "$EXAMPLE_SELECTION" ]; then EXTRA_ARGS="$EXTRA_ARGS EXAMPLE_SELECTION=$EXAMPLE_SELECTION"; fi
 
 # Process GPU-ENV pairs
 LAUNCHED=0

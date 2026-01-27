@@ -1,27 +1,22 @@
-# Experience Replay (ER) Configuration for RAGEN
+# Experience Replay (ER) Configuration for RAGEN (9-task benchmark).
 #
-# This config enables in-context learning through experience replay.
-# Successful trajectories are collected and used as examples in prompts.
-# No parameter updates - pure in-context learning.
+# This config reuses Mix Training benchmark settings while enabling
+# in-context experience replay without parameter updates.
 #
 # Usage:
 #   python train_er.py --config-name experience_replay
 #   or
-#   bash run_er.sh
-#
-# Specify environment:
-#   ENV_TAG=Bandit bash run_er.sh
-#   ENV_TAG=CoordSokoban bash run_er.sh
-#   ENV_TAG=CoordFrozenLake bash run_er.sh
+#   ENV_TAG=BanditLow bash run_er_9tasks.sh
 
 defaults:
-  - base
+  - mix_training_9tasks
+  - _self_
 
 # Override base settings for Experience Replay
 trainer:
-  project_name: ragen_experience_replay
-  experiment_name: er_bandit
-  total_training_steps: 1000  # Not used directly, training ends when buffer is full
+  project_name: ragen_experience_replay_9tasks
+  experiment_name: er_9tasks
+  total_training_steps: 1000  # Not used directly; ER stops when buffer is full
   test_freq: 1  # Validation handled by ER method
   save_freq: 1000
   val_before_train: False  # ER handles its own initial validation
@@ -32,18 +27,12 @@ trainer:
 
 # Experience Replay specific settings
 experience_replay:
-  # Environment to train on
-  # Options: Bandit, CoordSokoban, CoordFrozenLake
-  env_tag: Bandit
-  
+  # Environment to train on (9-task benchmark tags)
+  env_tag: BanditLow
+
   # Buffer settings
-  buffer_size: 20  # N: Maximum experiences to collect before ending
-  val_frequency: 5  # M: Validate every M new experiences
-  
-  # In-context example settings
-  max_examples_in_prompt: 3  # How many examples to include in prompts
-  example_selection: random  # random, recent, or best
-  
+  buffer_size: 20  # N: Maximum successful rollouts to collect
+
   # Output settings
   output_dir: results/experience_replay
 
@@ -55,24 +44,14 @@ agent_proxy:
 # ES Manager settings - will be dynamically set based on env_tag
 es_manager:
   train:
-    env_groups: 8
-    group_size: 16
+    env_groups: 18  # Placeholder; overridden using mix_training environments
+    group_size: 8
     env_configs:
-      tags: ["Bandit"]  # Placeholder, will be set by script
-      n_groups: [8]
+      tags: ["BanditLow"]
+      n_groups: [2]
   val:
     env_groups: 32
-    group_size: 16
+    group_size: 8
     env_configs:
-      tags: ["Bandit"]  # Placeholder, will be set by script
+      tags: ["BanditLowVal"]
       n_groups: [32]
-
-# Rollout settings
-actor_rollout_ref:
-  rollout:
-    response_length: 500
-    val_kwargs:
-      do_sample: True
-      temperature: 0.5
-      # max_model_len: 4096
-      # response_length: 256

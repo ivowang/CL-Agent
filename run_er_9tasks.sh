@@ -26,7 +26,7 @@
 #   ENV_TAG=FrozenLakeHard bash run_er_9tasks.sh
 #
 #   # With custom buffer settings
-#   ENV_TAG=SokobanMedium BUFFER_SIZE=30 VAL_FREQ=10 bash run_er_9tasks.sh
+#   ENV_TAG=SokobanMedium BUFFER_SIZE=30 bash run_er_9tasks.sh
 #
 #   # Use specific GPUs
 #   CUDA_VISIBLE_DEVICES=0 ENV_TAG=BanditLow bash run_er_9tasks.sh
@@ -66,10 +66,7 @@ if [ $VALID -eq 0 ]; then
 fi
 
 # Experience Replay settings
-BUFFER_SIZE="${BUFFER_SIZE:-20}"      # N: Max experiences to collect
-VAL_FREQ="${VAL_FREQ:-1}"             # M: Validate every M experiences
-MAX_EXAMPLES="${MAX_EXAMPLES:-10}"    # Examples to include in prompt
-EXAMPLE_SELECTION="${EXAMPLE_SELECTION:-random}"  # random, recent, best
+BUFFER_SIZE="${BUFFER_SIZE:-20}"      # N: Max successful rollouts to collect
 
 echo "=============================================================="
 echo "RAGEN 9-Task Experience Replay Training"
@@ -79,9 +76,6 @@ echo "WANDB_MODE: ${WANDB_MODE}"
 echo "Environment: ${ENV_TAG}"
 echo "ER Parameters:"
 echo "  - buffer_size (N): ${BUFFER_SIZE}"
-echo "  - val_frequency (M): ${VAL_FREQ}"
-echo "  - max_examples: ${MAX_EXAMPLES}"
-echo "  - example_selection: ${EXAMPLE_SELECTION}"
 echo "=============================================================="
 
 # Build command
@@ -93,9 +87,6 @@ CMD="$CMD \"system.CUDA_VISIBLE_DEVICES='${CUDA_VISIBLE_DEVICES}'\""
 # Add ER parameters
 CMD="$CMD \"experience_replay.env_tag='${ENV_TAG}'\""
 CMD="$CMD experience_replay.buffer_size=${BUFFER_SIZE}"
-CMD="$CMD experience_replay.val_frequency=${VAL_FREQ}"
-CMD="$CMD experience_replay.max_examples_in_prompt=${MAX_EXAMPLES}"
-CMD="$CMD \"experience_replay.example_selection='${EXAMPLE_SELECTION}'\""
 
 echo "Running: $CMD"
 eval $CMD
