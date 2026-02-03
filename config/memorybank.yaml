@@ -1,0 +1,46 @@
+# MemoryBank configuration (9-task benchmark compatible).
+#
+# This config reuses Mix Training settings to ensure comparable zero-shot
+# validation and environment sampling, while enabling retrieval-based memory.
+
+defaults:
+  - mix_training_9tasks
+  - _self_
+
+trainer:
+  project_name: ragen_memorybank_9tasks
+  experiment_name: memorybank_9tasks
+  total_training_steps: 1000  # Not used directly; stops when buffer is full
+  test_freq: 1  # Validation handled by MemoryBank trainer
+  save_freq: 1000
+  val_before_train: False
+  generations_to_log_to_wandb:
+    val: 20
+  logger: ['console', 'wandb']
+  resume_mode: disable
+
+memorybank:
+  # Environment to train on (9-task benchmark tags)
+  env_tag: BanditLow
+  # Buffer size N (max successful rollouts to collect)
+  buffer_size: 20
+  # Retrieval parameters
+  top_k: 4
+  decay_tau: 5.0
+  # Output settings
+  output_dir: results/memorybank
+
+# ES manager settings (placeholder; overridden to match mix_training environments)
+es_manager:
+  train:
+    env_groups: 18
+    group_size: 8
+    env_configs:
+      tags: ["BanditLow"]
+      n_groups: [2]
+  val:
+    env_groups: 32
+    group_size: 8
+    env_configs:
+      tags: ["BanditLowVal"]
+      n_groups: [32]
