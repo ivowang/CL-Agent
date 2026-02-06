@@ -384,7 +384,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             l2p_config = self.config.model.get("l2p", None)
             l2p_enabled = bool(l2p_config and l2p_config.get("enable", False))
             if l2p_enabled:
-                from ragen.cl_methods.l2p_prompt import L2PPromptPool, L2PPromptPoolConfig, get_input_embedding_layer
+                from cl_methods.l2p_prompt import L2PPromptPool, L2PPromptPoolConfig, get_input_embedding_layer
 
                 if self._is_lora and self.rank == 0:
                     print("[L2P] Warning: LoRA is enabled while L2P is requested. "

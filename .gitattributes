@@ -1,0 +1,2 @@
+# Disable LFS/filters for data files; track them as normal Git blobs.
+data/** -filter -diff -merge -text

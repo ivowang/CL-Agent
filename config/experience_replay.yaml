@@ -4,9 +4,9 @@
 # in-context experience replay without parameter updates.
 #
 # Usage:
-#   python train_er.py --config-name experience_replay
+#   python train_scripts/train_er.py --config-name experience_replay
 #   or
-#   ENV_TAG=BanditLow bash run_er_9tasks.sh
+#   ENV_TAG=BanditLow bash runs/run_er.sh
 
 defaults:
   - mix_training_9tasks

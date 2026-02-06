@@ -54,11 +54,26 @@ lean_requires = [
 ]
 
 setup(
-    name='ragen',
+    name='cl-agent',
     version='0.1',
     package_dir={'': '.'},
-    packages=find_packages(include=['ragen']),
-    author='RAGEN Team',
+    packages=find_packages(
+        include=[
+            'cl_methods',
+            'cl_methods.*',
+            'env',
+            'env.*',
+            'llm_agent',
+            'llm_agent.*',
+            'patches',
+            'patches.*',
+            'trainer',
+            'trainer.*',
+            'workers',
+            'workers.*',
+        ]
+    ),
+    author='CL-Agent Team',
     author_email='',
     acknowledgements='',
     description='',
@@ -68,7 +83,6 @@ setup(
         "lean": lean_requires,
         "all": webshop_requires + lean_requires,
     },
-    package_data={'ragen': ['*/*.md']},
     classifiers=[
         'Development Status :: 4 - Beta',
         'Intended Audience :: Science/Research',

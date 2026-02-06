@@ -19,13 +19,13 @@
 #   checkpoints/mix_9tasks/{timestamp}/global_step_{N}/
 #
 # Usage:
-#   python train_mix.py --config-name mix_training_9tasks
+#   python train_scripts/train_mix.py --config-name mix_training_9tasks
 #   or
-#   bash run_mix_9tasks.sh
+#   bash runs/run_mix.sh
 #
 # With custom parameters:
-#   TOTAL_STEPS=1200 TEST_FREQ=20 bash run_mix_9tasks.sh
-#   MIX_TASKS=BanditLow,BanditMedium,BanditHard bash run_mix_9tasks.sh
+#   TOTAL_STEPS=1200 TEST_FREQ=20 bash runs/run_mix.sh
+#   MIX_TASKS=BanditLow,BanditMedium,BanditHard bash runs/run_mix.sh
 
 defaults:
   - base

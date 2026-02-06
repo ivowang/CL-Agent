@@ -18,12 +18,12 @@
 #   checkpoints/baseline_9tasks/{timestamp}/global_step_{N}/
 #
 # Usage:
-#   python train_continual.py --config-name continual_learning_9tasks
+#   python train_scripts/train_continual.py --config-name continual_learning_9tasks
 #   or
-#   bash run_continual_9tasks.sh
+#   bash runs/run_baseline.sh
 #
 # With custom task order:
-#   TASK_ORDER=036147258 bash run_continual_9tasks.sh
+#   TASK_ORDER=036147258 bash runs/run_baseline.sh
 
 defaults:
   - base

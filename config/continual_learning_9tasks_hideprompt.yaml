@@ -19,12 +19,12 @@
 #   checkpoints/hideprompt_9tasks/{timestamp}/global_step_{N}/
 #
 # Usage:
-#   python train_continual.py --config-name continual_learning_9tasks_hideprompt
+#   python train_scripts/train_continual.py --config-name continual_learning_9tasks_hideprompt
 #   or
-#   bash run_continual_9tasks_hideprompt.sh
+#   bash runs/run_hideprompt.sh
 #
 # With custom parameters:
-#   REG_WEIGHT=0.1 PROMPT_LENGTH=5 bash run_continual_9tasks_hideprompt.sh
+#   REG_WEIGHT=0.1 PROMPT_LENGTH=5 bash runs/run_hideprompt.sh
 
 defaults:
   - base

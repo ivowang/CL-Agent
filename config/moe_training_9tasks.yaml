@@ -14,9 +14,9 @@
 #   checkpoints/moe_9tasks/{timestamp}/global_step_{N}/task_{i}/
 #
 # Usage:
-#   python train_moe.py --config-name moe_training_9tasks
+#   python train_scripts/train_moe.py --config-name moe_training_9tasks
 #   or
-#   bash run_moe_9tasks.sh
+#   bash runs/run_moe.sh
 
 defaults:
   - base
